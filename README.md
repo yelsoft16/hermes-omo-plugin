@@ -9,3 +9,13 @@ Local Hermes plugin that drives OmO (oh-my-openagent) sessions over its RPC host
 - Slash command: `/omo status|list|stop|resume <id>`
 
 Design: `docs/specs/2026-10-19-omo-plugin-design.md`
+
+## Usage
+
+```
+omo_start(task="/ulw-plan add a health endpoint", cwd="/home/frappe/frappe-bench")
+omo_wait(session_id)
+# → question payload; answer with clarify + omo_answer
+```
+
+Bundled skill: `omo:omo-orchestration`.
