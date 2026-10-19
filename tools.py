@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import questions, schemas
 from .host_client import (
-    HostClient, HostError, OpenResult, TransportGone,
+    DIALOG_METHODS, HostClient, HostError, OpenResult, TransportGone,
     check_protocol, default_socket_path, ensure_host, host_status,
 )
 from .sessions import SessionStore, new_session_id
@@ -85,9 +85,17 @@ def _resolve_cwd(cwd: str | None) -> str:
     roots = _cfg("allowed_roots", []) or []
     if roots:
         allowed = [os.path.realpath(r) for r in roots]
-        if not any(real == root or real.startswith(root + os.sep) for root in allowed):
+        if not any(_under(real, root) for root in allowed):
             raise HostError("invalid_cwd", f"outside allowed_roots: {real}")
     return real
+
+
+def _under(path: str, root: str) -> bool:
+    """True when path is root or inside it; commonpath handles root="/"."""
+    try:
+        return os.path.commonpath((path, root)) == root
+    except ValueError:
+        return False
 
 
 def _open_host() -> HostClient:
@@ -101,6 +109,18 @@ def _open_host() -> HostClient:
     return host
 
 
+def _safe_close(session_id: str) -> None:
+    """Best-effort close of a host session; never raises."""
+    try:
+        host = _open_host()
+        try:
+            host.close_session(session_id)
+        finally:
+            host.close()
+    except Exception:
+        pass
+
+
 def _attach(host: HostClient, rec) -> OpenResult:
     if not rec["session_path"]:
         raise HostError("session_lost", f"{rec['id']} has no session path")
@@ -108,31 +128,42 @@ def _attach(host: HostClient, rec) -> OpenResult:
 
 
 def _timeout(args: dict) -> int:
-    return max(1, min(int(args.get("timeout_s") or _cfg("wait_timeout_s", 90)), 120))
+    value = args.get("timeout_s")
+    if value is None:
+        value = _cfg("wait_timeout_s", 90)
+    return max(1, min(int(value), 120))
 
 
-def _next_state(host: HostClient, opened, timeout_s: int):
-    frames = [e for e in opened.buffered if e.get("method") in
-              {"question", "select", "input", "confirm"}]
+def _next_state(host: HostClient, opened, timeout_s: float):
+    frames = [e for e in opened.buffered if e.get("method") in DIALOG_METHODS]
     if not frames:
         frames = [e for e in (opened.state.get("pendingQuestions") or [])
-                  if e.get("method") in {"question", "select", "input", "confirm"}]
+                  if e.get("method") in DIALOG_METHODS]
     return host.collect(timeout_s, buffered=frames)
 
 
 def _collect_with_retry(rec, timeout_s: int):
-    """Attach, read, and retry once if the socket drops mid-wait."""
-    last_exc = None
+    """Attach, read, and retry once if the socket drops mid-wait.
+
+    One deadline covers every attempt so a retry cannot double the wait.
+    """
+    deadline = time.time() + timeout_s
+    last_exc: TransportGone | None = None
     for _ in range(2):
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
         host = _open_host()
         try:
             opened = _attach(host, rec)
-            return _next_state(host, opened, timeout_s)
+            return _next_state(host, opened, remaining)
         except TransportGone as exc:
             last_exc = exc
         finally:
             host.close()
-    raise last_exc
+    if last_exc is not None and time.time() < deadline:
+        raise last_exc
+    return "running", None, ""
 
 
 def _question_result(store: SessionStore, rec, frame: dict, text: str) -> str:
@@ -177,6 +208,9 @@ def _resolve(store: SessionStore, hermes_session_id: str, session_id: str | None
 
 def handle_start(args: dict, **kwargs) -> str:
     try:
+        task = args.get("task")
+        if not isinstance(task, str) or not task.strip():
+            raise HostError("omo_error", "task is required")
         hermes_sid = kwargs.get("session_id") or ""
         store = get_store()
         running = store.active_for(hermes_sid)
@@ -188,6 +222,7 @@ def handle_start(args: dict, **kwargs) -> str:
         _validate_permission(permission)
         provider, model_id = _split_model(args.get("model"))
         sid = new_session_id()
+        opened = None
         ensure_host(_socket_path())
         with HostClient(_socket_path()) as host:
             check_protocol(host.protocol_info())
@@ -196,21 +231,26 @@ def handle_start(args: dict, **kwargs) -> str:
                                        permission=permission,
                                        provider=provider, model_id=model_id)
             try:
-                host.prompt(opened.session_id, args["task"])
-            except HostError:
-                host.close_session(opened.session_id)
-                raise
-            for _ in range(10):
-                if opened.session_path:
-                    break
-                opened.session_path = host.get_state(opened.session_id).get("sessionFile")
+                host.prompt(opened.session_id, task)
+                for _ in range(10):
+                    if opened.session_path:
+                        break
+                    opened.session_path = host.get_state(
+                        opened.session_id).get("sessionFile")
+                    if not opened.session_path:
+                        time.sleep(0.2)
                 if not opened.session_path:
-                    time.sleep(0.2)
-        store.create(id=sid, hermes_session_id=hermes_sid,
-                     omo_session_id=opened.session_id,
-                     durable_session_id=opened.durable_session_id,
-                     session_path=opened.session_path, cwd=cwd,
-                     model=args.get("model"), permission=permission, status="running")
+                    raise HostError("session_lost",
+                                    "host did not return a session path")
+                store.create(id=sid, hermes_session_id=hermes_sid,
+                             omo_session_id=opened.session_id,
+                             durable_session_id=opened.durable_session_id,
+                             session_path=opened.session_path, cwd=cwd,
+                             model=args.get("model"), permission=permission,
+                             status="running")
+            except Exception:
+                _safe_close(opened.session_id)
+                raise
         return _json({"ok": True, "session_id": sid, "status": "running",
                       "cwd": cwd, "model": args.get("model"),
                       "permission": permission})
@@ -224,7 +264,9 @@ def handle_wait(args: dict, **kwargs) -> str:
     try:
         store = get_store()
         rec = _resolve(store, kwargs.get("session_id") or "", args.get("session_id"))
-        if rec["status"] in ("done", "cancelled", "error"):
+        if rec["status"] == "error":
+            return _err("omo_error", rec["last_text"] or "")
+        if rec["status"] in ("done", "cancelled"):
             return _json({"ok": True, "session_id": rec["id"], "status": rec["status"],
                           "text": rec["last_text"] or ""})
         if rec["status"] == "idle":
@@ -232,6 +274,8 @@ def handle_wait(args: dict, **kwargs) -> str:
                           "text": rec["last_text"] or ""})
         status, frame, text = _collect_with_retry(rec, _timeout(args))
         if status == "question":
+            if frame is None:
+                raise HostError("omo_error", "question event missing")
             return _question_result(store, rec, frame, text)
         if status == "done":
             return _done_result(store, rec, text)
@@ -257,6 +301,9 @@ def handle_status(args: dict, **kwargs) -> str:
         return _json({
             "ok": True, "session_id": rec["id"], "status": rec["status"],
             "cwd": rec["cwd"], "model": rec["model"], "permission": rec["permission"],
+            "session_path": rec["session_path"],
+            "OMO_SESSION_ID": rec["omo_session_id"],
+            "durable_session_id": rec["durable_session_id"],
             "created_at": rec["created_at"],
             "elapsed_s": int((datetime.now(timezone.utc)
                               - datetime.fromisoformat(rec["created_at"])).total_seconds()),
@@ -275,6 +322,8 @@ def handle_cancel(args: dict, **kwargs) -> str:
     try:
         store = get_store()
         rec = _resolve(store, kwargs.get("session_id") or "", args.get("session_id"))
+        if rec["status"] in ("done", "cancelled", "error"):
+            return _json({"ok": True, "session_id": rec["id"], "status": rec["status"]})
         if rec["session_path"]:
             try:
                 host = _open_host()
@@ -282,12 +331,15 @@ def handle_cancel(args: dict, **kwargs) -> str:
                     opened = _attach(host, rec)
                     try:
                         host.abort(opened.session_id)
-                    except HostError:
+                    except Exception:
                         pass
-                    host.close_session(opened.session_id)
+                    try:
+                        host.close_session(opened.session_id)
+                    except Exception:
+                        pass
                 finally:
                     host.close()
-            except HostError:
+            except Exception:
                 pass
         store.update(rec["id"], status="cancelled",
                      pending_request_id=None, pending_question=None)
