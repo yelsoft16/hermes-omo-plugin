@@ -16,6 +16,8 @@ OmO runs as an external agent behind its own host daemon. You drive it with six 
 4. `omo_answer(session_id, request_id, answers)` — sends the answer and waits
    for the next question or completion.
 5. Repeat 3–4. On `done`, report `text` to the user.
+   `done` is only reported after OmO's `agent_settled`; `agent_end` alone is a
+   turn yield and may be followed by retries or a consultant continuation.
 
 Never call `omo_wait` on an `idle` session; it returns immediately. To continue
 one, call `omo_resume(session_id, message)`; for a new task, call `omo_start`.
@@ -55,6 +57,9 @@ omo_answer(session_id, request_id, answers)
 ## New task vs resume
 
 - New task → `omo_start` (fresh session, no prior context).
+- Close the current session and optionally start fresh → `/omo_new [--cwd PATH]
+  [--permission PRESET] [task]`. With no task it only closes; the next
+  `omo_start` starts clean.
 - Continue an old session → `omo_resume(session_id, message)`.
 - Do not use `omo_resume` to start a new task.
 

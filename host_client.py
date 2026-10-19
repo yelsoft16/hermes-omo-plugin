@@ -299,11 +299,10 @@ class HostClient:
                 ) -> tuple[str, dict | None, str]:
         deadline = time.time() + max(1.0, min(float(timeout_s), 120.0))
         text: list[str] = []
-        agent_end_at: float | None = None
         settled = False
 
         def handle(event: dict) -> tuple[str, dict] | None:
-            nonlocal agent_end_at, settled
+            nonlocal settled
             kind = event.get("type")
             if kind == "extension_ui_request" and event.get("method") in DIALOG_METHODS:
                 return "question", event
@@ -311,8 +310,6 @@ class HostClient:
                 for part in (event.get("message") or {}).get("content", []):
                     if part.get("type") == "text":
                         text.append(part.get("text", ""))
-            if kind == "agent_end":
-                agent_end_at = time.time()
             if kind == "agent_settled":
                 settled = True
             return None
@@ -325,15 +322,16 @@ class HostClient:
             return "done", None, "".join(text)
         for event in self._events(deadline):
             if event is None:
-                if agent_end_at is not None and time.time() - agent_end_at > 2.0:
-                    return "done", None, "".join(text)
                 continue
             hit = handle(event)
             if hit:
                 return hit[0], hit[1], "".join(text)
             if settled:
                 return "done", None, "".join(text)
-        if settled or agent_end_at is not None:
+        # agent_end alone is only one low-level run; retries, compaction and
+        # consultant continuations can still follow. Only agent_settled is
+        # terminal, so an unfinished turn stays running and the session open.
+        if settled:
             return "done", None, "".join(text)
         return "running", None, "".join(text)
 

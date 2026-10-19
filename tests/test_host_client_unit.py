@@ -200,6 +200,22 @@ class TestHostClient(unittest.TestCase):
             {"type": "agent_settled"})
         self.assertEqual(self.host.collect(timeout_s=1), ("done", None, "hello"))
 
+    def test_agent_end_alone_is_not_done(self):
+        self.send({"type": "turn_end", "message": {"content": [
+            {"type": "text", "text": "partial"}]}},
+            {"type": "agent_end"})
+        self.assertEqual(self.host.collect(timeout_s=1),
+                         ("running", None, "partial"))
+
+    def test_agent_settled_after_agent_end_is_done(self):
+        self.send({"type": "turn_end", "message": {"content": [
+            {"type": "text", "text": "done text"}]}},
+            {"type": "agent_end"})
+        self.assertEqual(self.host.collect(timeout_s=1),
+                         ("running", None, "done text"))
+        self.send({"type": "agent_settled"})
+        self.assertEqual(self.host.collect(timeout_s=1), ("done", None, ""))
+
     def test_failed_response_raises_error_code(self):
         self.send(response("get_state-1", success=False, error="no such session",
                            error_code="session_not_found"))

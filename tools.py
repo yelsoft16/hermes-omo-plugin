@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import threading
 import time
@@ -456,7 +457,8 @@ def handle_resume(args: dict, **kwargs) -> str:
         return _err("omo_error", str(exc))
 
 
-USAGE = "Usage: /omo status | /omo list | /omo stop | /omo resume <id> [message]"
+USAGE = ("Usage: /omo status | /omo list | /omo stop | /omo new [--cwd PATH] "
+         "[--permission PRESET] [task] | /omo resume <id> [message]")
 
 
 def _format_status(data: dict) -> str:
@@ -501,6 +503,52 @@ def _command_target(**kwargs):
     return (store.resolve(hermes_sid, None) if hermes_sid else None) or store.latest()
 
 
+def handle_new(raw_args: str = "", **kwargs) -> str:
+    """Close the current OmO session and optionally start a fresh one."""
+    try:
+        tokens = shlex.split(raw_args or "")
+        cwd = None
+        permission = None
+        task_parts: list[str] = []
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token in ("--cwd", "-C") and index + 1 < len(tokens):
+                cwd = tokens[index + 1]
+                index += 2
+            elif token == "--permission" and index + 1 < len(tokens):
+                permission = tokens[index + 1]
+                index += 2
+            else:
+                task_parts.append(token)
+                index += 1
+        task = " ".join(task_parts).strip()
+        hermes_sid = _command_hermes_sid(**kwargs)
+        store = get_store()
+        rec = store.active_for(hermes_sid) if hermes_sid else None
+        if rec is None:
+            rec = store.latest()
+        closed = None
+        if rec is not None and rec["status"] in ("starting", "running", "question"):
+            data = json.loads(handle_cancel({"session_id": rec["id"]}))
+            if data.get("ok"):
+                closed = rec["id"]
+        if not task:
+            return (f"Closed {closed}. Ready for a new session." if closed
+                    else "No active session. Ready for a new session.")
+        payload = {"task": task}
+        if cwd:
+            payload["cwd"] = cwd
+        if permission:
+            payload["permission"] = permission
+        data = json.loads(handle_start(payload, session_id=hermes_sid))
+        if not data.get("ok"):
+            return f"Error: {data.get('detail') or data.get('error')}"
+        return f"Started {data.get('session_id')} ({data.get('status', 'running')})"
+    except Exception as exc:
+        return f"omo_new: {exc}"
+
+
 def handle_command(raw_args: str, **kwargs) -> str:
     raw = (raw_args or "").strip()
     parts = raw.split()
@@ -529,6 +577,9 @@ def handle_command(raw_args: str, **kwargs) -> str:
             data = json.loads(handle_cancel({"session_id": rec["id"]}))
             return f"{data.get('session_id')}: {data.get('status')}" if data.get("ok") \
                 else f"Error: {data.get('detail')}"
+        if sub == "new":
+            rest = raw.split(None, 1)[1] if len(parts) > 1 else ""
+            return handle_new(rest, **kwargs)
         if sub == "resume":
             if len(parts) < 2:
                 return "Usage: /omo resume <id> [message]"
@@ -561,7 +612,10 @@ def register(ctx) -> None:
         ctx.register_tool(name=schema["name"], toolset="omo", schema=schema,
                           handler=handler, emoji="🤖", check_fn=_check_requirements)
     ctx.register_command("omo", handle_command, description="Control OmO sessions",
-                         args_hint="<status|list|stop|resume>")
+                         args_hint="<status|list|stop|new|resume>")
+    ctx.register_command("omo_new", handle_new,
+                         description="Close the current OmO session and optionally start a new one",
+                         args_hint="[--cwd PATH] [--permission PRESET] [task]")
     skill = Path(__file__).parent / "skills" / "omo-orchestration" / "SKILL.md"
     if skill.exists():
         ctx.register_skill("omo-orchestration", skill)
