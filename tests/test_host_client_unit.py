@@ -257,11 +257,27 @@ class TestHostCommandErrors(unittest.TestCase):
 
     @mock.patch("omo.host_client.subprocess.run")
     @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
+    def test_ensure_host_retries_when_cold_start_misses_its_window(self, _which, run):
+        down = subprocess.CompletedProcess(args=[], returncode=3,
+                                           stdout='{"reachable": false}', stderr="")
+        up = subprocess.CompletedProcess(args=[], returncode=0,
+                                         stdout='{"reachable": true, "pid": 9}', stderr="")
+        # status, failed ensure, probe still down, second ensure succeeds
+        run.side_effect = [down, subprocess.TimeoutExpired(cmd="omo", timeout=30),
+                           down, up]
+        self.assertEqual(host_client.ensure_host().get("pid"), 9)
+        self.assertEqual(run.call_args_list[-1].args[0][1:3], ["host", "ensure"])
+
+    @mock.patch("omo.host_client.subprocess.run")
+    @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
     def test_ensure_host_maps_timeout(self, _which, run):
         status = subprocess.CompletedProcess(args=[], returncode=0,
                                              stdout='{"reachable": false}', stderr="")
+        down = subprocess.CompletedProcess(args=[], returncode=3,
+                                           stdout='{"reachable": false}', stderr="")
         run.side_effect = [status,
-                           subprocess.TimeoutExpired(cmd="omo", timeout=30)]
+                           subprocess.TimeoutExpired(cmd="omo", timeout=30), down,
+                           subprocess.TimeoutExpired(cmd="omo", timeout=30), down]
         with self.assertRaises(HostError) as ctx:
             host_client.ensure_host()
         self.assertEqual(ctx.exception.code, "host_unavailable")

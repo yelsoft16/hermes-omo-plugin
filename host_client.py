@@ -111,7 +111,26 @@ def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
     args = [omo, "host", "ensure", "--json"]
     if socket_path:
         args += ["--socket", socket_path]
-    return _host_cmd(args, timeout)
+    # `omo host ensure` gives a cold host 10 s to answer get_protocol_info and
+    # exits non-zero when it misses that window, though the daemon often comes
+    # up right after. Retry once and probe first, so a start immediately after
+    # `omo host stop` does not fail with host_unavailable.
+    deadline = time.monotonic() + timeout
+    last: HostError | None = None
+    for _ in range(2):
+        try:
+            return _host_cmd(args, max(1, int(deadline - time.monotonic())))
+        except HostError as exc:
+            last = exc
+            time.sleep(1)
+            try:
+                status = host_status(socket_path, timeout=5)
+            except HostError:
+                continue
+            if status.get("reachable"):
+                return status
+    assert last is not None
+    raise last
 
 
 def check_protocol(info: dict) -> None:
