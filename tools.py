@@ -166,6 +166,15 @@ def _collect_with_retry(rec, timeout_s: int):
     return "running", None, ""
 
 
+def _matches_request(event: dict, request_id: str | None) -> bool:
+    """True when a UI event is the question identified by ``request_id``.
+
+    The wire shape is unconfirmed: the spike used ``uiRequestId`` while
+    ``questions.normalize_frame`` stores ``id``, so accept either.
+    """
+    return bool(request_id) and request_id in (event.get("id"), event.get("uiRequestId"))
+
+
 def _question_result(store: SessionStore, rec, frame: dict, text: str) -> str:
     payload = questions.normalize_frame(frame)
     if payload is None:
@@ -372,21 +381,26 @@ def handle_answer(args: dict, **kwargs) -> str:
                 if exc.code != "question_already_resolved":
                     raise
             # The answered question is still in the attach snapshot; drop only it.
+            # Clear the pending fields before collecting so a transport drop cannot
+            # leave status naming a question that was already answered.
+            store.update(rec["id"], status="running",
+                         pending_request_id=None, pending_question=None)
             opened.buffered = [e for e in opened.buffered
-                               if e.get("id") != payload["request_id"]]
+                               if not _matches_request(e, payload["request_id"])]
             opened.state["pendingQuestions"] = [
                 e for e in (opened.state.get("pendingQuestions") or [])
-                if e.get("id") != payload["request_id"]
+                if not _matches_request(e, payload["request_id"])
             ]
             status, frame, text = _next_state(host, opened, _timeout(args))
         finally:
             host.close()
         if status == "question":
+            if frame is None:
+                raise HostError("omo_error", "question event missing")
             return _question_result(store, rec, frame, text)
         if status == "done":
             return _done_result(store, rec, text)
-        store.update(rec["id"], status="running", last_text=text,
-                     pending_request_id=None, pending_question=None)
+        store.update(rec["id"], status="running", last_text=text)
         return _json({"ok": True, "session_id": rec["id"], "status": "running", "text": text})
     except HostError as exc:
         return _err(exc.code, exc.detail, exc.hint)
@@ -406,15 +420,27 @@ def handle_resume(args: dict, **kwargs) -> str:
                         "Use /omo list")
         if not rec["session_path"]:
             return _err("session_lost", f"{session_id} has no session path")
-        if rec["status"] in ("running", "question") and args.get("message"):
-            return _err("session_running", f"{session_id} is still {rec['status']}",
-                        "Call omo_wait or omo_cancel first")
         message = args.get("message")
+        if rec["status"] in ("running", "question"):
+            if message:
+                return _err("session_running", f"{session_id} is still {rec['status']}",
+                            "Call omo_wait or omo_cancel first")
+            # A live session keeps its pending question. Reopening it here would
+            # write idle and hide the question from omo_wait, so report the stored
+            # state as-is instead of attaching.
+            pending = json.loads(rec["pending_question"]) if rec["pending_question"] else None
+            status = "question" if rec["status"] == "question" and pending else "running"
+            return _json({"ok": True, "session_id": rec["id"], "status": status,
+                          "question": pending, "text": rec["last_text"] or ""})
         host = _open_host()
         try:
             opened = host.open_session(session_path=rec["session_path"])
             if message:
-                host.prompt(opened.session_id, message)
+                try:
+                    host.prompt(opened.session_id, message)
+                except Exception:
+                    _safe_close(opened.session_id)
+                    raise
         finally:
             host.close()
         status = "running" if message else "idle"
@@ -437,29 +463,70 @@ def _format_status(data: dict) -> str:
     lines = [f"{data['session_id']}  {data['status']}  {data.get('cwd', '')}"]
     if data.get("last_text"):
         lines.append(data["last_text"][-600:])
-    if data.get("pending_question"):
-        q = data["pending_question"]["questions"][0]
-        lines.append(f"Pending: {q['header']} — {q['question']}")
+    pending = data.get("pending_question")
+    questions = pending.get("questions") if isinstance(pending, dict) else None
+    if questions and isinstance(questions[0], dict):
+        q = questions[0]
+        lines.append(f"Pending: {q.get('header', '')} — {q.get('question', '')}")
     return "\n".join(lines)
 
 
+def _command_hermes_sid(**kwargs) -> str:
+    """Best-effort Hermes session id for a slash-command handler.
+
+    Command handlers receive only ``raw_args``; the gateway binds the
+    ``HERMES_SESSION_*`` context vars without a session id (so the ContextVar is
+    an explicit ``""``), hence the ``os.environ`` last resort.
+    """
+    value = kwargs.get("session_id") or ""
+    if value:
+        return value
+    try:
+        from gateway.session_context import get_session_env
+        value = get_session_env("HERMES_SESSION_ID", "") or ""
+    except Exception:
+        value = ""
+    return value or os.environ.get("HERMES_SESSION_ID", "") or ""
+
+
+def _command_target(**kwargs):
+    """The session a bare ``/omo`` command refers to.
+
+    Commands run before an agent turn exists, so with no id they fall back to the
+    most recent stored session globally (single-user local plugin). An id that
+    does not match a stored row is ignored for the same reason.
+    """
+    store = get_store()
+    hermes_sid = _command_hermes_sid(**kwargs)
+    return (store.resolve(hermes_sid, None) if hermes_sid else None) or store.latest()
+
+
 def handle_command(raw_args: str, **kwargs) -> str:
-    parts = (raw_args or "").strip().split()
+    raw = (raw_args or "").strip()
+    parts = raw.split()
     sub = parts[0] if parts else "status"
-    if sub in ("help", "-h", ""):
+    if sub in ("help", "-h"):
         return USAGE
     try:
-        hermes_sid = kwargs.get("session_id") or ""
         if sub == "status":
-            data = json.loads(handle_status({}, session_id=hermes_sid))
+            rec = _command_target(**kwargs)
+            if rec is None:
+                return "No omo sessions."
+            data = json.loads(handle_status({"session_id": rec["id"]}))
             return _format_status(data) if data.get("ok") else f"Error: {data.get('detail')}"
         if sub == "list":
-            rows = get_store().list_recent(hermes_sid, limit=10)
+            store = get_store()
+            hermes_sid = _command_hermes_sid(**kwargs)
+            rows = (store.list_recent(hermes_sid, limit=10) if hermes_sid else []) \
+                or store.list_all(limit=10)
             if not rows:
                 return "No omo sessions."
             return "\n".join(f"{r['id']}  {r['status']}  {r['cwd']}" for r in rows)
         if sub == "stop":
-            data = json.loads(handle_cancel({}, session_id=hermes_sid))
+            rec = _command_target(**kwargs)
+            if rec is None:
+                return "No omo sessions."
+            data = json.loads(handle_cancel({"session_id": rec["id"]}))
             return f"{data.get('session_id')}: {data.get('status')}" if data.get("ok") \
                 else f"Error: {data.get('detail')}"
         if sub == "resume":
@@ -468,7 +535,7 @@ def handle_command(raw_args: str, **kwargs) -> str:
             payload = {"session_id": parts[1]}
             if len(parts) > 2:
                 payload["message"] = " ".join(parts[2:])
-            data = json.loads(handle_resume(payload, session_id=hermes_sid))
+            data = json.loads(handle_resume(payload))
             return f"{data.get('session_id')}: {data.get('status')}" if data.get("ok") \
                 else f"Error: {data.get('detail')}"
         return USAGE
@@ -493,7 +560,8 @@ def register(ctx) -> None:
     ):
         ctx.register_tool(name=schema["name"], toolset="omo", schema=schema,
                           handler=handler, emoji="🤖", check_fn=_check_requirements)
-    ctx.register_command("omo", handle_command, description="Control OmO sessions")
+    ctx.register_command("omo", handle_command, description="Control OmO sessions",
+                         args_hint="<status|list|stop|resume>")
     skill = Path(__file__).parent / "skills" / "omo-orchestration" / "SKILL.md"
     if skill.exists():
         ctx.register_skill("omo-orchestration", skill)

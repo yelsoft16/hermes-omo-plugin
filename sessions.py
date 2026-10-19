@@ -121,3 +121,17 @@ class SessionStore:
                ORDER BY created_at DESC LIMIT ?""",
             (hermes_session_id, limit),
         ).fetchall()
+
+    def latest(self) -> sqlite3.Row | None:
+        """Most recent session regardless of Hermes chat, for id-less commands."""
+        return self.conn.execute(
+            """SELECT * FROM sessions
+               ORDER BY created_at DESC, rowid DESC LIMIT 1"""
+        ).fetchone()
+
+    def list_all(self, limit: int = 10) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT * FROM sessions
+               ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()

@@ -5,9 +5,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo import tools
+from omo import questions, tools
 from omo.host_client import HostError, OpenResult, TransportGone
 from omo.sessions import SessionStore
+
+
+def ui_frame(request_id: str, *, title: str = "Pick", key: str = "id") -> dict:
+    """A minimal extension_ui_request as the host emits it."""
+    return {"type": "extension_ui_request", key: request_id, "method": "select",
+            "title": title, "options": ["a", "b"]}
 
 
 class TestToolHelpers(unittest.TestCase):
@@ -64,6 +70,12 @@ class TestToolHelpers(unittest.TestCase):
                     tools._resolve_cwd(other)
             self.assertEqual(getattr(ctx.exception, "code", ""), "invalid_cwd")
 
+    def test_matches_request_accepts_id_or_ui_request_id(self):
+        self.assertTrue(tools._matches_request({"id": "q1"}, "q1"))
+        self.assertTrue(tools._matches_request({"uiRequestId": "q1"}, "q1"))
+        self.assertFalse(tools._matches_request({"id": "q2"}, "q1"))
+        self.assertFalse(tools._matches_request({"id": None}, None))
+
 
 class FakeClock:
     def __init__(self, start: float = 1000.0) -> None:
@@ -81,6 +93,7 @@ class FakeHost:
                  prompt_error: Exception | None = None,
                  state_error: Exception | None = None,
                  abort_error: Exception | None = None,
+                 answer_error: Exception | None = None,
                  collect_results: list | None = None,
                  clock: FakeClock | None = None,
                  collect_advance: list[float] | None = None) -> None:
@@ -90,12 +103,14 @@ class FakeHost:
         self.prompt_error = prompt_error
         self.state_error = state_error
         self.abort_error = abort_error
+        self.answer_error = answer_error
         self.collect_results = list(collect_results or [])
         self.clock = clock
         self.collect_advance = list(collect_advance or [])
         self.open_calls = 0
         self.open_kwargs: dict = {}
         self.prompt_calls: list[tuple[str, str]] = []
+        self.answer_calls: list[tuple[str, str, dict]] = []
         self.closed_sessions: list[str] = []
         self.aborted: list[str] = []
         self.collect_timeouts: list[float] = []
@@ -123,6 +138,11 @@ class FakeHost:
         self.prompt_calls.append((session_id, message))
         if self.prompt_error:
             raise self.prompt_error
+
+    def answer(self, session_id: str, ui_request_id: str, body: dict) -> None:
+        self.answer_calls.append((session_id, ui_request_id, body))
+        if self.answer_error:
+            raise self.answer_error
 
     def get_state(self, session_id: str) -> dict:
         if self.state_error:
@@ -166,14 +186,15 @@ class HandlerTestCase(unittest.TestCase):
         self.addCleanup(ctx_patch.stop)
 
     def add_session(self, status="running", session_path="/tmp/omo-session.json",
-                    omo_session_id="rpc-1", durable_session_id="durable-1"):
-        self.store.create(id="omo-test", hermes_session_id="hermes-1",
+                    omo_session_id="rpc-1", durable_session_id="durable-1",
+                    session_id="omo-test", hermes_session_id="hermes-1"):
+        self.store.create(id=session_id, hermes_session_id=hermes_session_id,
                           omo_session_id=omo_session_id,
                           durable_session_id=durable_session_id,
                           session_path=session_path, cwd=self._tmp.name,
                           model="provider/model", permission="full-access",
                           status=status)
-        return self.store.get("omo-test")
+        return self.store.get(session_id)
 
     def start(self, args, host, *, check_protocol=True):
         patches = [
@@ -325,6 +346,150 @@ class TestHandleCancel(HandlerTestCase):
         self.assertEqual(out["status"], "done")
         self.assertEqual(self.store.get(rec["id"])["status"], "done")
         open_host.assert_not_called()
+
+
+class TestHandleAnswer(HandlerTestCase):
+    def add_question(self, rec, request_id="q1") -> dict:
+        payload = questions.normalize_frame(ui_frame(request_id))
+        self.store.update(rec["id"], status="question",
+                          pending_request_id=request_id,
+                          pending_question=json.dumps(payload))
+        return payload
+
+    def test_removes_only_the_answered_frame_and_sends_the_answer(self):
+        rec = self.add_session()
+        self.add_question(rec, "q1")
+        q1 = ui_frame("q1", title="First")
+        q9 = ui_frame("q9", title="Second")
+        # Same question, wire shape from the spike: filtered via uiRequestId.
+        pending_q1 = ui_frame("q1", title="First", key="uiRequestId")
+        host = FakeHost(open_result=OpenResult(
+            session_id="rpc-1", session_path="/tmp/omo-session.json",
+            durable_session_id="durable-1",
+            state={"pendingQuestions": [pending_q1]}, buffered=[q1, q9]),
+            collect_results=[("question", q9, "next")])
+        with patch.object(tools, "_open_host", return_value=host):
+            out = json.loads(tools.handle_answer(
+                {"request_id": "q1", "answers": {"q1": {"selected": ["a"]}}},
+                session_id="hermes-1"))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "question")
+        self.assertEqual(out["question"]["request_id"], "q9")
+        self.assertEqual(host.answer_calls, [("rpc-1", "q1", {"value": "a"})])
+        self.assertEqual([e["id"] for e in host.open_result.buffered], ["q9"])
+        self.assertEqual(host.open_result.state["pendingQuestions"], [])
+        self.assertEqual(self.store.get(rec["id"])["pending_request_id"], "q9")
+
+    def test_already_resolved_question_is_not_an_error(self):
+        rec = self.add_session()
+        self.add_question(rec)
+        host = FakeHost(answer_error=HostError("question_already_resolved", "gone"),
+                        collect_results=[("running", None, "")])
+        with patch.object(tools, "_open_host", return_value=host):
+            out = json.loads(tools.handle_answer(
+                {"request_id": "q1", "answers": {"q1": {"selected": ["a"]}}},
+                session_id="hermes-1"))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "running")
+        self.assertIsNone(self.store.get(rec["id"])["pending_question"])
+
+    def test_clears_the_pending_question_before_collecting(self):
+        rec = self.add_session()
+        self.add_question(rec)
+        host = FakeHost(collect_results=[TransportGone()])
+        with patch.object(tools, "_open_host", return_value=host):
+            out = json.loads(tools.handle_answer(
+                {"request_id": "q1", "answers": {}}, session_id="hermes-1"))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "host_unavailable")
+        row = self.store.get(rec["id"])
+        self.assertEqual(row["status"], "running")
+        self.assertIsNone(row["pending_request_id"])
+        self.assertIsNone(row["pending_question"])
+
+    def test_missing_question_frame_is_reported(self):
+        rec = self.add_session()
+        self.add_question(rec)
+        host = FakeHost(collect_results=[("question", None, "")])
+        with patch.object(tools, "_open_host", return_value=host):
+            out = json.loads(tools.handle_answer(
+                {"request_id": "q1", "answers": {}}, session_id="hermes-1"))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "omo_error")
+        self.assertEqual(out["detail"], "question event missing")
+
+
+class TestHandleResume(HandlerTestCase):
+    def test_requires_an_explicit_session_id(self):
+        with patch.object(tools, "_open_host") as open_host:
+            out = json.loads(tools.handle_resume({}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "omo_error")
+        self.assertEqual(out["detail"], "session_id is required")
+        open_host.assert_not_called()
+
+    def test_rejects_a_message_while_still_live(self):
+        for status in ("running", "question"):
+            with self.subTest(status=status):
+                rec = self.add_session(status=status, session_id=f"omo-{status}")
+                with patch.object(tools, "_open_host") as open_host:
+                    out = json.loads(tools.handle_resume(
+                        {"session_id": rec["id"], "message": "again"}))
+                self.assertFalse(out["ok"])
+                self.assertEqual(out["error"], "session_running")
+                open_host.assert_not_called()
+
+    def test_no_message_resume_of_a_done_session_returns_idle(self):
+        rec = self.add_session(status="done")
+        host = FakeHost(open_result=OpenResult(
+            session_id="rpc-2", session_path="/tmp/omo-session.json",
+            durable_session_id=None))
+        with patch.object(tools, "_open_host", return_value=host):
+            out = json.loads(tools.handle_resume({"session_id": rec["id"]}))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "idle")
+        self.assertEqual(host.open_calls, 1)
+        self.assertEqual(host.prompt_calls, [])
+        row = self.store.get(rec["id"])
+        self.assertEqual(row["status"], "idle")
+        self.assertEqual(row["omo_session_id"], "rpc-2")
+        self.assertEqual(row["durable_session_id"], "durable-1")
+
+    def test_no_message_resume_of_a_running_session_returns_running(self):
+        rec = self.add_session(status="running")
+        with patch.object(tools, "_open_host") as open_host:
+            out = json.loads(tools.handle_resume({"session_id": rec["id"]}))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "running")
+        self.assertIsNone(out["question"])
+        open_host.assert_not_called()
+        self.assertEqual(self.store.get(rec["id"])["status"], "running")
+
+    def test_no_message_resume_keeps_a_pending_question(self):
+        rec = self.add_session(status="question")
+        payload = questions.normalize_frame(ui_frame("q1"))
+        self.store.update(rec["id"], pending_request_id="q1",
+                          pending_question=json.dumps(payload), last_text="working")
+        with patch.object(tools, "_open_host") as open_host:
+            out = json.loads(tools.handle_resume({"session_id": rec["id"]}))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "question")
+        self.assertEqual(out["question"]["request_id"], "q1")
+        open_host.assert_not_called()
+        row = self.store.get(rec["id"])
+        self.assertEqual(row["status"], "question")
+        self.assertEqual(row["pending_request_id"], "q1")
+
+    def test_prompt_failure_closes_the_reopened_session(self):
+        rec = self.add_session(status="done")
+        host = FakeHost(prompt_error=HostError("omo_error", "prompt rejected"))
+        with patch.object(tools, "_open_host", return_value=host):
+            out = json.loads(tools.handle_resume(
+                {"session_id": rec["id"], "message": "go"}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "omo_error")
+        self.assertEqual(host.closed_sessions, ["rpc-1"])
+        self.assertEqual(self.store.get(rec["id"])["status"], "done")
 
 
 if __name__ == "__main__":
