@@ -67,13 +67,14 @@ def _last_json_line(text: str) -> dict:
     raise ValueError("no JSON object in output")
 
 
-def _host_cmd(args: list[str], timeout: int) -> dict:
+def _host_cmd(args: list[str], timeout: int,
+              ok_codes: tuple[int, ...] = (0,)) -> dict:
     try:
         proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise HostError("host_unavailable", f"timed out after {timeout}s",
                         "Run: omo host ensure") from exc
-    if proc.returncode != 0:
+    if proc.returncode not in ok_codes:
         raise HostError("host_unavailable", proc.stderr.strip() or proc.stdout.strip(),
                         "Run: omo host ensure")
     try:
@@ -90,7 +91,9 @@ def host_status(socket_path: str | None = None, timeout: int = 15) -> dict:
     args = [omo, "host", "status", "--json"]
     if socket_path:
         args += ["--socket", socket_path]
-    return _host_cmd(args, timeout)
+    # `omo host status` exits 3 while the host is down, yet still prints the
+    # status JSON; a bare non-zero code must not hide reachable=false.
+    return _host_cmd(args, timeout, ok_codes=(0, 3))
 
 
 def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
@@ -253,8 +256,9 @@ class HostClient:
         return opened
 
     def prompt(self, session_id: str, message: str) -> str:
+        # A cold host may spend >20s booting the agent runtime before it acks.
         resp, _ = self.request({"type": "prompt", "sessionId": session_id,
-                                "message": message}, timeout=20)
+                                "message": message}, timeout=60)
         return (resp.get("data") or {}).get("disposition", "")
 
     def get_state(self, session_id: str) -> dict:

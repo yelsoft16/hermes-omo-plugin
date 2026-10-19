@@ -229,6 +229,25 @@ class TestHostCommandErrors(unittest.TestCase):
 
     @mock.patch("omo.host_client.subprocess.run")
     @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
+    def test_host_status_accepts_exit_code_3_when_host_is_down(self, _which, run):
+        run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=3,
+            stdout='{"reachable": false, "socket": "/tmp/rpc.sock"}', stderr="")
+        self.assertFalse(host_client.host_status().get("reachable"))
+
+    @mock.patch("omo.host_client.subprocess.run")
+    @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
+    def test_ensure_host_starts_when_status_reports_down(self, _which, run):
+        down = subprocess.CompletedProcess(args=[], returncode=3,
+                                           stdout='{"reachable": false}', stderr="")
+        up = subprocess.CompletedProcess(args=[], returncode=0,
+                                         stdout='{"reachable": true, "pid": 9}', stderr="")
+        run.side_effect = [down, up]
+        self.assertEqual(host_client.ensure_host().get("pid"), 9)
+        self.assertEqual(run.call_args_list[1].args[0][1:3], ["host", "ensure"])
+
+    @mock.patch("omo.host_client.subprocess.run")
+    @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
     def test_ensure_host_maps_timeout(self, _which, run):
         status = subprocess.CompletedProcess(args=[], returncode=0,
                                              stdout='{"reachable": false}', stderr="")
