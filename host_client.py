@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 DIALOG_METHODS = {"question", "select", "input", "confirm"}
@@ -66,6 +67,22 @@ def _last_json_line(text: str) -> dict:
     raise ValueError("no JSON object in output")
 
 
+def _host_cmd(args: list[str], timeout: int) -> dict:
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise HostError("host_unavailable", f"timed out after {timeout}s",
+                        "Run: omo host ensure") from exc
+    if proc.returncode != 0:
+        raise HostError("host_unavailable", proc.stderr.strip() or proc.stdout.strip(),
+                        "Run: omo host ensure")
+    try:
+        return _last_json_line(proc.stdout)
+    except ValueError as exc:
+        raise HostError("host_unavailable", f"invalid host output: {exc}",
+                        "Run: omo host ensure") from exc
+
+
 def host_status(socket_path: str | None = None, timeout: int = 15) -> dict:
     omo = shutil.which("omo")
     if not omo:
@@ -73,11 +90,7 @@ def host_status(socket_path: str | None = None, timeout: int = 15) -> dict:
     args = [omo, "host", "status", "--json"]
     if socket_path:
         args += ["--socket", socket_path]
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        raise HostError("host_unavailable", proc.stderr.strip() or proc.stdout.strip(),
-                        "Run: omo host ensure")
-    return _last_json_line(proc.stdout)
+    return _host_cmd(args, timeout)
 
 
 def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
@@ -90,11 +103,7 @@ def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
     args = [omo, "host", "ensure", "--json"]
     if socket_path:
         args += ["--socket", socket_path]
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        raise HostError("host_unavailable", proc.stderr.strip() or proc.stdout.strip(),
-                        "Run: omo host ensure")
-    return _last_json_line(proc.stdout)
+    return _host_cmd(args, timeout)
 
 
 def check_protocol(info: dict) -> None:
@@ -126,6 +135,7 @@ class HostClient:
         self._connect_timeout = connect_timeout
         self._sock: socket.socket | None = None
         self._buf = JsonlBuffer()
+        self._pending: deque[dict] = deque()
         self._seq = 0
 
     def __enter__(self) -> "HostClient":
@@ -144,8 +154,12 @@ class HostClient:
             sock.close()
             raise HostError("host_unavailable", str(exc), "Run: omo host ensure") from exc
         sock.settimeout(None)
+        self.attach_socket(sock)
+
+    def attach_socket(self, sock: socket.socket) -> None:
         self._sock = sock
         self._buf = JsonlBuffer()
+        self._pending.clear()
         self._send({"id": "ci", "type": "set_client_info", "width": 100,
                     "capabilities": ["question"]})
 
@@ -166,7 +180,11 @@ class HostClient:
         self._sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))
 
     def _events(self, deadline: float):
-        while time.time() < deadline:
+        while True:
+            while self._pending:
+                yield self._pending.popleft()
+            if time.time() >= deadline:
+                return
             if self._sock is None:
                 raise TransportGone()
             try:
@@ -182,10 +200,10 @@ class HostClient:
                 raise TransportGone(str(exc)) from exc
             if not chunk:
                 raise TransportGone()
-            for event in self._buf.feed(chunk):
-                yield event
+            self._pending.extend(self._buf.feed(chunk))
 
-    def request(self, payload: dict, timeout: float = 15.0) -> tuple[dict, list[dict]]:
+    def request(self, payload: dict, timeout: float = 15.0,
+                keep_extra: bool = True) -> tuple[dict, list[dict]]:
         payload = dict(payload)
         payload["id"] = payload.get("id") or self._next_id(payload["type"])
         rid = payload["id"]
@@ -196,11 +214,15 @@ class HostClient:
             if event is None:
                 continue
             if event.get("type") == "response" and event.get("id") == rid:
+                if keep_extra and extra:
+                    self._pending.extendleft(reversed(extra))
                 if not event.get("success"):
                     err = event.get("error") or ""
                     raise HostError(event.get("errorCode") or err or "omo_error", err, "")
                 return event, extra
             extra.append(event)
+        if keep_extra and extra:
+            self._pending.extendleft(reversed(extra))
         raise HostError("timeout", f"no response for {payload['type']}")
 
     def protocol_info(self) -> dict:
@@ -225,7 +247,7 @@ class HostClient:
             payload["provider"] = provider
         if model_id:
             payload["modelId"] = model_id
-        resp, extra = self.request(payload, timeout=20)
+        resp, extra = self.request(payload, timeout=20, keep_extra=False)
         opened = parse_open_response(resp, fallback_path=session_path)
         opened.buffered = [e for e in extra if e.get("type") == "extension_ui_request"]
         return opened
@@ -240,9 +262,9 @@ class HostClient:
         return (resp.get("data") or {}).get("state") or {}
 
     def answer(self, session_id: str, ui_request_id: str, body: dict) -> None:
-        payload = {"type": "extension_ui_response", "sessionId": session_id,
-                   "uiRequestId": ui_request_id}
-        payload.update(body)
+        payload = dict(body or {})
+        payload.update({"type": "extension_ui_response", "sessionId": session_id,
+                        "uiRequestId": ui_request_id})
         self.request(payload, timeout=15)
 
     def collect(self, timeout_s: float = 90, buffered: list[dict] | None = None
