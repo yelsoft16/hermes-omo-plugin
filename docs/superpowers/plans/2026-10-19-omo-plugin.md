@@ -413,7 +413,7 @@ def build_answer(payload: dict, answers: dict, comment: str = "") -> dict:
 - [ ] **Step 4: Run the tests and verify they pass**
 
 Run: `python3 -m unittest tests.test_questions -v`
-Expected: 11 tests, `OK`.
+Expected: 10 tests, `OK`.
 
 - [ ] **Step 5: Commit**
 
@@ -942,8 +942,8 @@ class HostClient:
                 continue
             if event.get("type") == "response" and event.get("id") == rid:
                 if not event.get("success"):
-                    raise HostError(event.get("errorCode") or "omo_error",
-                                    event.get("error") or "", "")
+                    err = event.get("error") or ""
+                    raise HostError(event.get("errorCode") or err or "omo_error", err, "")
                 return event, extra
             extra.append(event)
         raise HostError("timeout", f"no response for {payload['type']}")
@@ -1590,7 +1590,7 @@ provides_hooks: []
 - [ ] **Step 6: Run the unit tests**
 
 Run: `python3 -m unittest tests.test_tools_unit -v`
-Expected: 6 tests, `OK`.
+Expected: 7 tests, `OK`.
 
 - [ ] **Step 7: Run plugin doctor**
 
