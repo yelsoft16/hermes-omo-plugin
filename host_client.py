@@ -93,7 +93,12 @@ def host_status(socket_path: str | None = None, timeout: int = 15) -> dict:
         args += ["--socket", socket_path]
     # `omo host status` exits 3 while the host is down, yet still prints the
     # status JSON; a bare non-zero code must not hide reachable=false.
-    return _host_cmd(args, timeout, ok_codes=(0, 3))
+    data = _host_cmd(args, timeout, ok_codes=(0, 3))
+    if "reachable" not in data:
+        # Exit 3 with unrelated JSON on stdout is not a status report.
+        raise HostError("host_unavailable", f"unexpected host status output: {data}",
+                        "Run: omo host ensure")
+    return data
 
 
 def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:

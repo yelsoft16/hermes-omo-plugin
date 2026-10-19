@@ -237,6 +237,15 @@ class TestHostCommandErrors(unittest.TestCase):
 
     @mock.patch("omo.host_client.subprocess.run")
     @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
+    def test_host_status_rejects_unrelated_json_on_exit_code_3(self, _which, run):
+        run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=3, stdout='{"error": "something else"}', stderr="")
+        with self.assertRaises(HostError) as ctx:
+            host_client.host_status()
+        self.assertEqual(ctx.exception.code, "host_unavailable")
+
+    @mock.patch("omo.host_client.subprocess.run")
+    @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
     def test_ensure_host_starts_when_status_reports_down(self, _which, run):
         down = subprocess.CompletedProcess(args=[], returncode=3,
                                            stdout='{"reachable": false}', stderr="")
