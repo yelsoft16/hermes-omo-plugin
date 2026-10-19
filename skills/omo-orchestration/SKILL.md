@@ -10,13 +10,15 @@ OmO runs as an external agent behind its own host daemon. You drive it with six 
 ## The loop
 
 1. `omo_start(task="...", cwd="...")` — always a NEW session.
-2. `omo_wait(session_id)` — repeat until `status` is `question` or `done`.
+2. `omo_wait(session_id)` — repeat until `status` is `question` or a terminal state:
+   `done`, `cancelled`, or `error` (surfaced as `omo_error`). Stop there; do not loop.
 3. On `question`: ask the user with `clarify`, using the exact option labels.
 4. `omo_answer(session_id, request_id, answers)` — sends the answer and waits
    for the next question or completion.
 5. Repeat 3–4. On `done`, report `text` to the user.
 
-Never call `omo_wait` on an `idle` session; it returns immediately.
+Never call `omo_wait` on an `idle` session; it returns immediately. To continue
+one, call `omo_resume(session_id, message)`; for a new task, call `omo_start`.
 
 ## Answer shape
 
@@ -35,8 +37,9 @@ Never call `omo_wait` on an `idle` session; it returns immediately.
 - `multiSelect: true` → `clarify` `multi_select: true`.
 - `options[].label` must be passed verbatim.
 - `freeText: true` → no choices; use the user's text.
-- If `clarify` returns no answer, send `{"comment": "no answer"}` only when the
-  question is optional; for approval gates, ask again.
+- If `clarify` returns no answer, call
+  `omo_answer(session_id, request_id, answers={}, comment="no answer")` only when
+  the question is optional; for approval gates, ask again.
 
 ## /ulw-plan recipe
 
@@ -57,10 +60,12 @@ omo_answer(session_id, request_id, answers)
 
 ## Errors
 
-- `session_running` → `omo_wait` or `omo_cancel`, or pass `parallel=true`.
+- `session_running` → `omo_wait` or `omo_cancel`, or pass `parallel=true` to
+  `omo_start` only (`omo_resume` has no `parallel`).
 - `host_unavailable` → the plugin tries `omo host ensure` once; if it persists,
   report the error.
-- `session_lost` → start a new session.
+- `session_lost` → call `omo_cancel(session_id)` and then `omo_start`, or call
+  `omo_start(..., parallel=true)`.
 - `protocol_mismatch` → the installed OmO version is incompatible; stop.
 
 ## Security
