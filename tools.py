@@ -350,6 +350,132 @@ def handle_cancel(args: dict, **kwargs) -> str:
         return _err("omo_error", str(exc))
 
 
+def handle_answer(args: dict, **kwargs) -> str:
+    try:
+        store = get_store()
+        rec = _resolve(store, kwargs.get("session_id") or "", args.get("session_id"))
+        if not rec["pending_question"]:
+            return _err("omo_error", "no pending question for this session",
+                        "Call omo_wait first")
+        payload = json.loads(rec["pending_question"])
+        if args.get("request_id") and args["request_id"] != payload["request_id"]:
+            return _err("omo_error", "request_id does not match the pending question",
+                        "Call omo_status to refresh")
+        body = questions.build_answer(payload, args.get("answers") or {},
+                                      args.get("comment") or "")
+        host = _open_host()
+        try:
+            opened = _attach(host, rec)
+            try:
+                host.answer(opened.session_id, payload["request_id"], body)
+            except HostError as exc:
+                if exc.code != "question_already_resolved":
+                    raise
+            # The answered question is still in the attach snapshot; drop only it.
+            opened.buffered = [e for e in opened.buffered
+                               if e.get("id") != payload["request_id"]]
+            opened.state["pendingQuestions"] = [
+                e for e in (opened.state.get("pendingQuestions") or [])
+                if e.get("id") != payload["request_id"]
+            ]
+            status, frame, text = _next_state(host, opened, _timeout(args))
+        finally:
+            host.close()
+        if status == "question":
+            return _question_result(store, rec, frame, text)
+        if status == "done":
+            return _done_result(store, rec, text)
+        store.update(rec["id"], status="running", last_text=text,
+                     pending_request_id=None, pending_question=None)
+        return _json({"ok": True, "session_id": rec["id"], "status": "running", "text": text})
+    except HostError as exc:
+        return _err(exc.code, exc.detail, exc.hint)
+    except Exception as exc:
+        return _err("omo_error", str(exc))
+
+
+def handle_resume(args: dict, **kwargs) -> str:
+    try:
+        store = get_store()
+        session_id = args.get("session_id")
+        if not session_id:
+            return _err("omo_error", "session_id is required", "Use /omo list")
+        rec = store.get(session_id)
+        if rec is None:
+            return _err("session_not_found", f"unknown session: {session_id}",
+                        "Use /omo list")
+        if not rec["session_path"]:
+            return _err("session_lost", f"{session_id} has no session path")
+        if rec["status"] in ("running", "question") and args.get("message"):
+            return _err("session_running", f"{session_id} is still {rec['status']}",
+                        "Call omo_wait or omo_cancel first")
+        message = args.get("message")
+        host = _open_host()
+        try:
+            opened = host.open_session(session_path=rec["session_path"])
+            if message:
+                host.prompt(opened.session_id, message)
+        finally:
+            host.close()
+        status = "running" if message else "idle"
+        store.update(rec["id"], status=status, omo_session_id=opened.session_id,
+                     durable_session_id=opened.durable_session_id or rec["durable_session_id"],
+                     session_path=opened.session_path or rec["session_path"],
+                     pending_request_id=None, pending_question=None)
+        return _json({"ok": True, "session_id": rec["id"], "status": status,
+                      "text": rec["last_text"] or ""})
+    except HostError as exc:
+        return _err(exc.code, exc.detail, exc.hint)
+    except Exception as exc:
+        return _err("omo_error", str(exc))
+
+
+USAGE = "Usage: /omo status | /omo list | /omo stop | /omo resume <id> [message]"
+
+
+def _format_status(data: dict) -> str:
+    lines = [f"{data['session_id']}  {data['status']}  {data.get('cwd', '')}"]
+    if data.get("last_text"):
+        lines.append(data["last_text"][-600:])
+    if data.get("pending_question"):
+        q = data["pending_question"]["questions"][0]
+        lines.append(f"Pending: {q['header']} — {q['question']}")
+    return "\n".join(lines)
+
+
+def handle_command(raw_args: str, **kwargs) -> str:
+    parts = (raw_args or "").strip().split()
+    sub = parts[0] if parts else "status"
+    if sub in ("help", "-h", ""):
+        return USAGE
+    try:
+        hermes_sid = kwargs.get("session_id") or ""
+        if sub == "status":
+            data = json.loads(handle_status({}, session_id=hermes_sid))
+            return _format_status(data) if data.get("ok") else f"Error: {data.get('detail')}"
+        if sub == "list":
+            rows = get_store().list_recent(hermes_sid, limit=10)
+            if not rows:
+                return "No omo sessions."
+            return "\n".join(f"{r['id']}  {r['status']}  {r['cwd']}" for r in rows)
+        if sub == "stop":
+            data = json.loads(handle_cancel({}, session_id=hermes_sid))
+            return f"{data.get('session_id')}: {data.get('status')}" if data.get("ok") \
+                else f"Error: {data.get('detail')}"
+        if sub == "resume":
+            if len(parts) < 2:
+                return "Usage: /omo resume <id> [message]"
+            payload = {"session_id": parts[1]}
+            if len(parts) > 2:
+                payload["message"] = " ".join(parts[2:])
+            data = json.loads(handle_resume(payload, session_id=hermes_sid))
+            return f"{data.get('session_id')}: {data.get('status')}" if data.get("ok") \
+                else f"Error: {data.get('detail')}"
+        return USAGE
+    except Exception as exc:
+        return f"omo: {exc}"
+
+
 def _check_requirements() -> bool:
     return shutil.which("omo") is not None
 
@@ -360,8 +486,14 @@ def register(ctx) -> None:
     for schema, handler in (
         (schemas.OMO_START, handle_start),
         (schemas.OMO_WAIT, handle_wait),
+        (schemas.OMO_ANSWER, handle_answer),
         (schemas.OMO_STATUS, handle_status),
         (schemas.OMO_CANCEL, handle_cancel),
+        (schemas.OMO_RESUME, handle_resume),
     ):
         ctx.register_tool(name=schema["name"], toolset="omo", schema=schema,
                           handler=handler, emoji="🤖", check_fn=_check_requirements)
+    ctx.register_command("omo", handle_command, description="Control OmO sessions")
+    skill = Path(__file__).parent / "skills" / "omo-orchestration" / "SKILL.md"
+    if skill.exists():
+        ctx.register_skill("omo-orchestration", skill)
