@@ -358,7 +358,6 @@ Döner:
   "status": "question|done|running|idle|error",
   "question": { "...QuestionPayload..." },
   "text": "son anlamlı metin",
-  "usage": {"input":0,"output":0,"total":0},
   "expires_at": "ISO-8601 (soru varsa)"
 }
 ```
@@ -417,7 +416,6 @@ Böylece eski bir plan oturumuna yeni bir talimatla devam edilebilir.
 | `wait_timeout_s` | `90` | `omo_wait` varsayılanı (max 120) |
 | `auto_close` | `true` | `done` sonrası `close_session` |
 | `host_socket` | `~/.omo/agent/rpc/rpc.sock` | Unix soket yolu |
-| `debug_log` | `false` | Ayrıntılı log (prompt içeriği hariç) |
 
 `__init__.py` ayrıca `ctx.register_skill("omo-orchestration", ...)` ile paket
 skill'ini kaydeder; model `skill_view("omo:omo-orchestration")` ile yükler.
