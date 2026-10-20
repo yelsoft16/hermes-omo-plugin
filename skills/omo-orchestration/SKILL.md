@@ -24,6 +24,8 @@ Continuing vs starting new:
 - New session → `omo_start` (fresh) or `/omo_new` (closes the current one and
   starts fresh). Closing is always an explicit choice.
 - `omo_wait` on an `idle` session returns `idle` immediately; it does not block.
+- `omo_resume` and `omo_wait` probe the host first and start the on-demand
+  daemon with a 90s cold-start budget, so a stopped host is not a manual step.
 - `auto_close=true` is opt-in and restores the old "close on settle" behavior.
 
 State semantics: `running` means OmO is working; `question` means OmO asked and

@@ -564,6 +564,27 @@ class TestHandleAnswer(HandlerTestCase):
         self.assertEqual(out["detail"], "question event missing")
 
 
+class TestOpenHost(unittest.TestCase):
+    def test_ensures_the_host_before_connecting(self):
+        class Stub:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+                self.connected = False
+
+            def connect(self):
+                self.connected = True
+
+        client = Stub()
+        with patch.object(tools, "_socket_path", return_value="/tmp/omo.sock"), \
+                patch.object(tools, "ensure_host") as ensure, \
+                patch.object(tools, "HostClient", return_value=client) as factory:
+            host = tools._open_host()
+        self.assertIs(host, client)
+        self.assertTrue(client.connected)
+        ensure.assert_called_once_with("/tmp/omo.sock", timeout=90)
+        factory.assert_called_once_with("/tmp/omo.sock", connect_timeout=10)
+
+
 class TestHandleResume(HandlerTestCase):
     def test_requires_an_explicit_session_id(self):
         with patch.object(tools, "_open_host") as open_host:

@@ -100,12 +100,17 @@ def _under(path: str, root: str) -> bool:
 
 
 def _open_host() -> HostClient:
-    host = HostClient(_socket_path())
+    # Resume/wait/answer may run after the on-demand host daemon has gone
+    # away. Probe (and start) it first with a cold-start budget; the connect
+    # retry stays as a race guard for a daemon that dies between the probe
+    # and the socket connect.
+    ensure_host(_socket_path(), timeout=90)
+    host = HostClient(_socket_path(), connect_timeout=10)
     try:
         host.connect()
     except HostError:
-        ensure_host(_socket_path())
-        host = HostClient(_socket_path())
+        ensure_host(_socket_path(), timeout=90)
+        host = HostClient(_socket_path(), connect_timeout=10)
         host.connect()
     return host
 
