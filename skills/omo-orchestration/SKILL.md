@@ -38,6 +38,26 @@ open tool call, stop-state count 0) and reports `idle` **only when no answer is
 pending**. Re-present the pending question, then continue with `omo_resume`.
 `omo_cancel` is only for explicit abandonment.
 
+## Verification budget
+
+OmO runs its own tests inside its session. Treat its evidence block as the
+primary record; it must list the command, exit code, and counts.
+
+Do not re-run a full suite that OmO already ran. Verify cheaply and only what
+the decision depends on:
+
+- `git status --porcelain` and `git diff --stat` to confirm the changed set.
+- One smoke test for the riskiest path, only when the change is user-facing.
+- Read back external side effects (DB rows, files) that OmO claims to have
+  written.
+
+If OmO's report omits evidence or contradicts the working tree, run only the
+specific failing command. Label every claim "OmO-reported" or "verified here";
+never present a self-report as independent verification.
+
+Ask OmO for a compact close-out: files changed, commands + exit codes, tests
+skipped, remaining steps, and open risks. Cap prose and do not paste full logs.
+
 `done` is only reported after OmO's `agent_settled`; `agent_end` alone is a
 turn yield and may be followed by retries or a consultant continuation.
 
