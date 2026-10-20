@@ -21,6 +21,10 @@ The plugin talks to OmO's RPC host (`~/.omo/agent/rpc/rpc.sock`) and starts it
 on demand with `omo host ensure`. Restart the Hermes gateway after installing
 or updating so the new module is loaded.
 
+`main` is the latest stable release, so a plain `hermes plugins install` always
+clones it. Development happens on the `dev` branch; `-dev.N` tags are
+checkpoints, not releases.
+
 ## Usage
 
 ```
