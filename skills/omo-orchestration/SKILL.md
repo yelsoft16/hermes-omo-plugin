@@ -26,6 +26,13 @@ Continuing vs starting new:
 - `omo_wait` on an `idle` session returns `idle` immediately; it does not block.
 - `auto_close=true` is opt-in and restores the old "close on settle" behavior.
 
+If a clarify question times out, do NOT cancel or close the session. Leave it
+open and, on the user's next message, call `omo_status`: it reconciles a missed
+`agent_settled` by reading the transcript (last assistant stopReason `stop`, no
+open tool call, stop-state count 0) and reports `idle`. Re-present the pending
+question, then continue with `omo_resume`. `omo_cancel` is only for explicit
+abandonment.
+
 `done` is only reported after OmO's `agent_settled`; `agent_end` alone is a
 turn yield and may be followed by retries or a consultant continuation.
 

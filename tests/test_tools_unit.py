@@ -345,6 +345,57 @@ class TestHandleWait(HandlerTestCase):
         self.assertEqual(host.closed_sessions, ["rpc-1"])
         self.assertEqual(self.store.get(rec["id"])["status"], "done")
 
+    def test_wait_reconciles_a_settled_transcript_instead_of_staying_running(self):
+        transcript = Path(self._tmp.name) / "settled.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "message", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "final answer"}]}}) + "\n" +
+            json.dumps({"type": "custom", "customType": "senpi.hooks.stop-state",
+                        "data": {"count": 0}}) + "\n",
+            encoding="utf-8")
+        rec = self.add_session(session_path=str(transcript))
+        with patch.object(tools, "_collect_with_retry",
+                          return_value=("running", None, "")):
+            out = json.loads(tools.handle_wait(
+                {"session_id": rec["id"], "timeout_s": 10}))
+        self.assertEqual(out["status"], "done")
+        self.assertEqual(out["text"], "final answer")
+        self.assertEqual(self.store.get(rec["id"])["status"], "idle")
+
+    def test_wait_does_not_settle_while_a_tool_call_is_open(self):
+        transcript = Path(self._tmp.name) / "tool.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "message", "message": {
+                "role": "assistant", "stopReason": "toolUse",
+                "content": [{"type": "toolCall", "name": "bash"}]}}) + "\n" +
+            json.dumps({"type": "custom", "customType": "senpi.hooks.stop-state",
+                        "data": {"count": 0}}) + "\n",
+            encoding="utf-8")
+        rec = self.add_session(session_path=str(transcript))
+        with patch.object(tools, "_collect_with_retry",
+                          return_value=("running", None, "")):
+            out = json.loads(tools.handle_wait(
+                {"session_id": rec["id"], "timeout_s": 10}))
+        self.assertEqual(out["status"], "running")
+        self.assertEqual(self.store.get(rec["id"])["status"], "running")
+
+    def test_wait_does_not_settle_when_stop_state_has_pending_hooks(self):
+        transcript = Path(self._tmp.name) / "hooks.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "message", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "final"}]}}) + "\n" +
+            json.dumps({"type": "custom", "customType": "senpi.hooks.stop-state",
+                        "data": {"count": 1}}) + "\n",
+            encoding="utf-8")
+        rec = self.add_session(session_path=str(transcript))
+        with patch.object(tools, "_collect_with_retry",
+                          return_value=("running", None, "")):
+            out = json.loads(tools.handle_wait(
+                {"session_id": rec["id"], "timeout_s": 10}))
+        self.assertEqual(out["status"], "running")
+
     def test_stored_error_status_is_reported_as_an_error(self):
         rec = self.add_session(status="error")
         self.store.update(rec["id"], last_text="boom")
@@ -356,6 +407,23 @@ class TestHandleWait(HandlerTestCase):
 
 
 class TestHandleStatus(HandlerTestCase):
+    def test_reconciles_a_settled_transcript_to_idle(self):
+        transcript = Path(self._tmp.name) / "settled-status.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "message", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "final answer"}]}}) + "\n" +
+            json.dumps({"type": "custom", "customType": "senpi.hooks.stop-state",
+                        "data": {"count": 0}}) + "\n",
+            encoding="utf-8")
+        rec = self.add_session(session_path=str(transcript))
+        with patch.object(tools, "host_status", return_value={"reachable": False}):
+            out = json.loads(tools.handle_status({"session_id": rec["id"]},
+                                                 session_id="hermes-1"))
+        self.assertEqual(out["status"], "idle")
+        self.assertEqual(out["last_text"], "final answer")
+        self.assertEqual(self.store.get(rec["id"])["status"], "idle")
+
     def test_exposes_recovery_ids(self):
         rec = self.add_session()
         with patch.object(tools, "host_status",

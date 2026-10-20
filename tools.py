@@ -296,6 +296,9 @@ def handle_wait(args: dict, **kwargs) -> str:
             return _question_result(store, rec, frame, text)
         if status == "done":
             return _done_result(store, rec, text)
+        settled = _transcript_settled_text(rec["session_path"])
+        if settled is not None:
+            return _done_result(store, rec, settled)
         store.update(rec["id"], status="running", last_text=text)
         return _json({"ok": True, "session_id": rec["id"], "status": "running", "text": text})
     except HostError as exc:
@@ -308,6 +311,14 @@ def handle_status(args: dict, **kwargs) -> str:
     try:
         store = get_store()
         rec = _resolve(store, kwargs.get("session_id") or "", args.get("session_id"))
+        if rec["status"] == "running":
+            settled = _transcript_settled_text(rec["session_path"])
+            if settled is not None:
+                store.update(rec["id"], status="idle", last_text=settled,
+                             pending_request_id=None, pending_question=None)
+                row = store.get(rec["id"])
+                if row is not None:
+                    rec = row
         info = {"reachable": False}
         try:
             status = host_status(_socket_path())
@@ -519,6 +530,47 @@ def _title_from_transcript(path: str | None, limit: int = TITLE_LIMIT) -> str:
     except OSError:
         return ""
     return ""
+
+
+def _transcript_settled_text(path: str | None) -> str | None:
+    """Settled fallback for a missed `agent_settled` event.
+
+    A turn is settled when the last assistant message stopped normally, carries
+    no open tool call, and the stop-state hook count is zero. Returns the final
+    text, or None while the transcript still shows work in flight.
+    """
+    if not path:
+        return None
+    last = None
+    stop_count = None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                typ = obj.get("type")
+                if typ == "message":
+                    msg = obj.get("message") or {}
+                    if msg.get("role") != "assistant":
+                        continue
+                    parts = msg.get("content") or []
+                    has_tool = any(
+                        isinstance(p, dict) and p.get("type") in
+                        ("toolCall", "tool_use", "tool-call") for p in parts)
+                    text = "".join(
+                        p.get("text") or "" for p in parts
+                        if isinstance(p, dict) and p.get("type") == "text")
+                    last = (msg.get("stopReason"), has_tool, text)
+                    stop_count = None
+                elif typ == "custom" and obj.get("customType") == "senpi.hooks.stop-state":
+                    stop_count = (obj.get("data") or {}).get("count")
+    except OSError:
+        return None
+    if last and last[0] == "stop" and not last[1] and stop_count == 0:
+        return last[2]
+    return None
 
 
 def _session_title(rec) -> str:
