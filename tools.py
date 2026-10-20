@@ -289,6 +289,12 @@ def handle_wait(args: dict, **kwargs) -> str:
         if rec["status"] == "idle":
             return _json({"ok": True, "session_id": rec["id"], "status": "idle",
                           "text": rec["last_text"] or ""})
+        if rec["status"] == "question" and rec["pending_question"]:
+            # The host is still waiting for this answer; re-present it instead
+            # of collecting again, so a late user reply continues the same turn.
+            return _json({"ok": True, "session_id": rec["id"], "status": "question",
+                          "question": json.loads(rec["pending_question"]),
+                          "text": rec["last_text"] or ""})
         status, frame, text = _collect_with_retry(rec, _timeout(args))
         if status == "question":
             if frame is None:
@@ -296,7 +302,8 @@ def handle_wait(args: dict, **kwargs) -> str:
             return _question_result(store, rec, frame, text)
         if status == "done":
             return _done_result(store, rec, text)
-        settled = _transcript_settled_text(rec["session_path"])
+        settled = None if rec["pending_request_id"] else \
+            _transcript_settled_text(rec["session_path"])
         if settled is not None:
             return _done_result(store, rec, settled)
         store.update(rec["id"], status="running", last_text=text)
@@ -311,7 +318,7 @@ def handle_status(args: dict, **kwargs) -> str:
     try:
         store = get_store()
         rec = _resolve(store, kwargs.get("session_id") or "", args.get("session_id"))
-        if rec["status"] == "running":
+        if rec["status"] == "running" and not rec["pending_request_id"]:
             settled = _transcript_settled_text(rec["session_path"])
             if settled is not None:
                 store.update(rec["id"], status="idle", last_text=settled,

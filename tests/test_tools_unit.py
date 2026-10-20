@@ -396,6 +396,22 @@ class TestHandleWait(HandlerTestCase):
                 {"session_id": rec["id"], "timeout_s": 10}))
         self.assertEqual(out["status"], "running")
 
+    def test_wait_re_presents_a_pending_question_without_asking_the_host(self):
+        rec = self.add_session(status="question")
+        payload = questions.normalize_frame(ui_frame("q1"))
+        self.store.update(rec["id"], pending_request_id="q1",
+                          pending_question=json.dumps(payload))
+        with patch.object(tools, "_open_host") as open_host, \
+                patch.object(tools, "_collect_with_retry") as collect:
+            out = json.loads(tools.handle_wait({"session_id": rec["id"]}))
+        self.assertEqual(out["status"], "question")
+        self.assertEqual(out["question"]["request_id"], "q1")
+        open_host.assert_not_called()
+        collect.assert_not_called()
+        row = self.store.get(rec["id"])
+        self.assertEqual(row["status"], "question")
+        self.assertEqual(row["pending_request_id"], "q1")
+
     def test_stored_error_status_is_reported_as_an_error(self):
         rec = self.add_session(status="error")
         self.store.update(rec["id"], last_text="boom")
@@ -407,6 +423,24 @@ class TestHandleWait(HandlerTestCase):
 
 
 class TestHandleStatus(HandlerTestCase):
+    def test_keeps_a_pending_question_even_when_the_transcript_looks_settled(self):
+        transcript = Path(self._tmp.name) / "settled-question.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "message", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": "answer?"}]}}) + "\n" +
+            json.dumps({"type": "custom", "customType": "senpi.hooks.stop-state",
+                        "data": {"count": 0}}) + "\n",
+            encoding="utf-8")
+        rec = self.add_session(status="question", session_path=str(transcript))
+        payload = questions.normalize_frame(ui_frame("q1"))
+        self.store.update(rec["id"], pending_request_id="q1",
+                          pending_question=json.dumps(payload))
+        with patch.object(tools, "host_status", return_value={"reachable": False}):
+            out = json.loads(tools.handle_status({"session_id": rec["id"]}))
+        self.assertEqual(out["status"], "question")
+        self.assertEqual(out["pending_question"]["request_id"], "q1")
+
     def test_reconciles_a_settled_transcript_to_idle(self):
         transcript = Path(self._tmp.name) / "settled-status.jsonl"
         transcript.write_text(
