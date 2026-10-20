@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -187,13 +188,14 @@ class HandlerTestCase(unittest.TestCase):
 
     def add_session(self, status="running", session_path="/tmp/omo-session.json",
                     omo_session_id="rpc-1", durable_session_id="durable-1",
-                    session_id="omo-test", hermes_session_id="hermes-1"):
+                    session_id="omo-test", hermes_session_id="hermes-1",
+                    title=None):
         self.store.create(id=session_id, hermes_session_id=hermes_session_id,
                           omo_session_id=omo_session_id,
                           durable_session_id=durable_session_id,
                           session_path=session_path, cwd=self._tmp.name,
                           model="provider/model", permission="full-access",
-                          status=status)
+                          status=status, title=title)
         return self.store.get(session_id)
 
     def start(self, args, host, *, check_protocol=True):
@@ -272,6 +274,20 @@ class TestHandleStart(HandlerTestCase):
         self.assertEqual(rec["session_path"], "/tmp/omo-session.json")
         self.assertEqual(rec["status"], "running")
         self.assertEqual(host.prompt_calls, [("rpc-1", "do it")])
+
+    def test_success_stores_the_task_as_the_session_title(self):
+        host = FakeHost()
+        out = self.start({"task": "fix the finalize bug\nand add a test",
+                          "cwd": self._tmp.name}, host)
+        rec = self.store.get(out["session_id"])
+        self.assertEqual(rec["title"], "fix the finalize bug and add a test")
+
+    def test_long_titles_are_truncated(self):
+        host = FakeHost()
+        out = self.start({"task": "x" * 200, "cwd": self._tmp.name}, host)
+        rec = self.store.get(out["session_id"])
+        self.assertLessEqual(len(rec["title"]), 80)
+        self.assertTrue(rec["title"].endswith("..."))
 
     def test_rejects_a_second_session_unless_parallel(self):
         self.add_session(status="running")
@@ -517,6 +533,39 @@ class TestHandleResume(HandlerTestCase):
         self.assertEqual(out["error"], "omo_error")
         self.assertEqual(host.closed_sessions, ["rpc-1"])
         self.assertEqual(self.store.get(rec["id"])["status"], "done")
+
+
+class TestSessionStoreSchema(unittest.TestCase):
+    def test_old_database_gets_a_title_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            conn = sqlite3.connect(path)
+            conn.executescript("""
+                CREATE TABLE sessions (
+                  id TEXT PRIMARY KEY,
+                  hermes_session_id TEXT,
+                  omo_session_id TEXT,
+                  durable_session_id TEXT,
+                  session_path TEXT,
+                  cwd TEXT NOT NULL,
+                  model TEXT,
+                  permission TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  pending_request_id TEXT,
+                  pending_question TEXT,
+                  last_text TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_sessions_hermes
+                  ON sessions (hermes_session_id, created_at DESC);
+            """)
+            conn.commit()
+            conn.close()
+            store = SessionStore(path)
+            self.addCleanup(store.close)
+            cols = {row[1] for row in store.conn.execute("PRAGMA table_info(sessions)")}
+            self.assertIn("title", cols)
 
 
 if __name__ == "__main__":

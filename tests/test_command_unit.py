@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from omo import tools
@@ -43,6 +44,36 @@ class TestCommandSessions(HandlerTestCase):
         self.assertIn("omo-old", out)
         self.assertIn("omo-new", out)
         self.assertLess(out.index("omo-new"), out.index("omo-old"))
+
+    def test_list_shows_a_readable_title_for_each_session(self):
+        self.add_session(session_id="omo-new", status="running",
+                         title="fix the finalize material request bug")
+        out = tools.handle_command("list")
+        self.assertIn("fix the finalize material request bug", out)
+        self.assertIn("running", out)
+        self.assertIn("omo-new", out)
+
+    def test_list_derives_a_title_from_the_transcript_when_missing(self):
+        transcript = Path(self._tmp.name) / "session.jsonl"
+        transcript.write_text(
+            '{"type": "session", "id": "x"}\n'
+            '{"type": "message", "message": {"role": "user", "content": '
+            '[{"type": "text", "text": "akrida planlayici hatasini teshis et"}]}}\n',
+            encoding="utf-8")
+        self.add_session(session_id="omo-legacy", status="done",
+                         session_path=str(transcript))
+        out = tools.handle_command("list")
+        self.assertIn("akrida planlayici hatasini teshis et", out)
+
+    def test_list_falls_back_to_last_text_then_untitled(self):
+        self.add_session(session_id="omo-last", status="done",
+                         session_path="/nonexistent/session.jsonl")
+        self.store.update("omo-last", last_text="son cevap metni")
+        self.add_session(session_id="omo-empty", status="done",
+                         session_path="/nonexistent/other.jsonl")
+        out = tools.handle_command("list")
+        self.assertIn("son cevap metni", out)
+        self.assertIn("untitled", out)
 
     def test_status_without_any_session_says_so(self):
         self.assertEqual(tools.handle_command("status"), "No omo sessions.")

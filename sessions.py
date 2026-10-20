@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   model              TEXT,
   permission         TEXT NOT NULL,
   status             TEXT NOT NULL,
+  title              TEXT,
   pending_request_id TEXT,
   pending_question   TEXT,
   last_text          TEXT,
@@ -31,7 +32,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_hermes
 
 UPDATABLE = {
     "omo_session_id", "durable_session_id", "session_path", "cwd", "model",
-    "permission", "status", "pending_request_id", "pending_question", "last_text",
+    "permission", "status", "title", "pending_request_id", "pending_question",
+    "last_text",
 }
 
 ACTIVE_STATUSES = ("starting", "running", "question")
@@ -54,23 +56,31 @@ class SessionStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        self._ensure_column("title", "TEXT")
         self.conn.commit()
+
+    def _ensure_column(self, name: str, decl: str) -> None:
+        # Forward migration for databases created before the column existed.
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(sessions)")}
+        if name not in cols:
+            self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {decl}")
 
     def close(self) -> None:
         self.conn.close()
 
     def create(self, *, id: str, hermes_session_id: str, omo_session_id: str | None,
                durable_session_id: str | None, session_path: str | None, cwd: str,
-               model: str | None, permission: str, status: str = "running") -> None:
+               model: str | None, permission: str, status: str = "running",
+               title: str | None = None) -> None:
         ts = now_iso()
         with self._lock:
             self.conn.execute(
                 """INSERT INTO sessions
                    (id, hermes_session_id, omo_session_id, durable_session_id, session_path,
-                    cwd, model, permission, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    cwd, model, permission, status, title, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (id, hermes_session_id, omo_session_id, durable_session_id, session_path,
-                 cwd, model, permission, status, ts, ts),
+                 cwd, model, permission, status, title, ts, ts),
             )
             self.conn.commit()
 

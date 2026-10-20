@@ -264,7 +264,7 @@ def handle_start(args: dict, **kwargs) -> str:
                              durable_session_id=opened.durable_session_id,
                              session_path=opened.session_path, cwd=cwd,
                              model=args.get("model"), permission=permission,
-                             status="running")
+                             status="running", title=_clip_title(task))
             except Exception:
                 _safe_close(opened.session_id)
                 raise
@@ -480,6 +480,67 @@ def _format_status(data: dict) -> str:
     return "\n".join(lines)
 
 
+TITLE_LIMIT = 80
+
+
+def _clip_title(text: str, limit: int = TITLE_LIMIT) -> str:
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: limit - 3].rstrip() + "..."
+
+
+def _title_from_transcript(path: str | None, limit: int = TITLE_LIMIT) -> str:
+    """First user prompt in an OmO transcript, used for sessions stored before titles."""
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for _, line in zip(range(500), fh):
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if obj.get("type") != "message":
+                    continue
+                msg = obj.get("message") or {}
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str):
+                    if content.strip():
+                        return _clip_title(content, limit)
+                    continue
+                for part in content or []:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text = part.get("text") or ""
+                        if text.strip():
+                            return _clip_title(text, limit)
+    except OSError:
+        return ""
+    return ""
+
+
+def _session_title(rec) -> str:
+    title = (rec["title"] or "").strip()
+    if title:
+        return title
+    title = _title_from_transcript(rec["session_path"])
+    if title:
+        return title
+    return _clip_title(rec["last_text"] or "") or "untitled"
+
+
+def _format_list_row(index: int, rec) -> str:
+    created = rec["created_at"] or ""
+    try:
+        when = datetime.fromisoformat(created).astimezone().strftime("%d.%m %H:%M")
+    except ValueError:
+        when = created[:16]
+    return (f"{index}. {_session_title(rec)}\n"
+            f"   {rec['status']}  ·  {when}  ·  {rec['id']}")
+
+
 def _command_hermes_sid(**kwargs) -> str:
     """Best-effort Hermes session id for a slash-command handler.
 
@@ -576,7 +637,8 @@ def handle_command(raw_args: str, **kwargs) -> str:
                 or store.list_all(limit=10)
             if not rows:
                 return "No omo sessions."
-            return "\n".join(f"{r['id']}  {r['status']}  {r['cwd']}" for r in rows)
+            return f"OmO sessions ({len(rows)}):\n" + "\n".join(
+                _format_list_row(i, r) for i, r in enumerate(rows, 1))
         if sub == "stop":
             rec = _command_target(**kwargs)
             if rec is None:
