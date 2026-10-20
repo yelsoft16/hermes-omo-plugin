@@ -302,6 +302,33 @@ class TestHandleWait(HandlerTestCase):
         self.assertEqual(clock.now - 1000.0, 90.0)
         self.assertEqual(self.store.get(rec["id"])["status"], "running")
 
+    def test_settled_keeps_the_session_open_by_default(self):
+        rec = self.add_session()
+        host = FakeHost(collect_results=[("done", None, "final answer")])
+        with patch.object(tools, "_open_host", return_value=host):
+            out = json.loads(tools.handle_wait(
+                {"session_id": rec["id"], "timeout_s": 10}, session_id="hermes-1"))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "done")
+        self.assertEqual(out["text"], "final answer")
+        self.assertEqual(host.closed_sessions, [])
+        row = self.store.get(rec["id"])
+        self.assertEqual(row["status"], "idle")
+        self.assertEqual(row["last_text"], "final answer")
+
+    def test_auto_close_true_still_closes_and_marks_done(self):
+        rec = self.add_session()
+        host = FakeHost(collect_results=[("done", None, "final answer")])
+        ctx = type("Ctx", (), {"get_config": lambda self, key, default=None: True})
+        with patch.object(tools, "_open_host", return_value=host), \
+                patch.object(tools, "_CTX", ctx()):
+            out = json.loads(tools.handle_wait(
+                {"session_id": rec["id"], "timeout_s": 10}, session_id="hermes-1"))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"], "done")
+        self.assertEqual(host.closed_sessions, ["rpc-1"])
+        self.assertEqual(self.store.get(rec["id"])["status"], "done")
+
     def test_stored_error_status_is_reported_as_an_error(self):
         rec = self.add_session(status="error")
         self.store.update(rec["id"], last_text="boom")

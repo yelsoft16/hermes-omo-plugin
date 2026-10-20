@@ -193,9 +193,16 @@ def _question_result(store: SessionStore, rec, frame: dict, text: str) -> str:
 
 
 def _done_result(store: SessionStore, rec, text: str) -> str:
-    store.update(rec["id"], status="done", last_text=text,
+    # The settled turn is complete, but the OmO session stays open by default
+    # so a follow-up can continue in the same session (matching the manual
+    # workflow: work until you close it or start a new one). Store it as
+    # `idle` -- `done` is reserved for the auto_close path, where the host
+    # session really is closed. The tool still answers `status="done"` for
+    # this turn so callers stop waiting.
+    auto_close = bool(_cfg("auto_close", False))
+    store.update(rec["id"], status="done" if auto_close else "idle", last_text=text,
                  pending_request_id=None, pending_question=None)
-    if _cfg("auto_close", True):
+    if auto_close:
         try:
             host = _open_host()
             try:

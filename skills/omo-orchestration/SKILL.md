@@ -15,9 +15,19 @@ OmO runs as an external agent behind its own host daemon. You drive it with six 
 3. On `question`: ask the user with `clarify`, using the exact option labels.
 4. `omo_answer(session_id, request_id, answers)` — sends the answer and waits
    for the next question or completion.
-5. Repeat 3–4. On `done`, report `text` to the user.
-   `done` is only reported after OmO's `agent_settled`; `agent_end` alone is a
-   turn yield and may be followed by retries or a consultant continuation.
+5. Repeat 3–4. On `done`, report `text` to the user. The session is NOT closed:
+   it becomes `idle` and stays available.
+
+Continuing vs starting new:
+
+- Same session, follow-up → `omo_resume(session_id, message)`.
+- New session → `omo_start` (fresh) or `/omo_new` (closes the current one and
+  starts fresh). Closing is always an explicit choice.
+- `omo_wait` on an `idle` session returns `idle` immediately; it does not block.
+- `auto_close=true` is opt-in and restores the old "close on settle" behavior.
+
+`done` is only reported after OmO's `agent_settled`; `agent_end` alone is a
+turn yield and may be followed by retries or a consultant continuation.
 
 Never call `omo_wait` on an `idle` session; it returns immediately. To continue
 one, call `omo_resume(session_id, message)`; for a new task, call `omo_start`.
@@ -73,8 +83,38 @@ omo_answer(session_id, request_id, answers)
   `omo_start(..., parallel=true)`.
 - `protocol_mismatch` → the installed OmO version is incompatible; stop.
 
+## Permission presets in headless RPC sessions
+
+OmO asks for approval before shell/eval commands in every preset except
+`full-access`. An RPC session has no attached user, so the prompt can never be
+answered and the turn waits forever. Consequences:
+
+- `read-only`, `workspace`, `accept-edits`, and `auto` are only safe for tasks
+  that need no shell command at all. A "read-only investigation" that must run
+  `bench`/`python`/`grep` WILL hang under `read-only`.
+- Use `full-access` for any task that executes commands, and enforce the
+  read-only intent in the task text ("only SELECT/read, do not write"). Do not
+  rely on the preset to express it.
+- Say explicitly in `task` that hindsight_* tools must not be called; they can
+  block on this host.
+
+## Is it hung, or waiting?
+
+Before cancelling, collect evidence instead of guessing:
+
+1. `omo host status --json` - `sessions.worker` counts sub-agent lanes. `worker: 0`
+   means OmO did not delegate; there is no child agent to wait for.
+2. Session transcript (`omo_status` -> `session_path`): check `mtime` and the last
+   record. A last record that is `toolCall` with no matching `toolResult` means a
+   tool is blocked - approval deadlock or a stuck tool - not a sub-agent.
+3. Process tree: `pgrep -aP <session-runtime-pid>`; no bash/python children while
+   a shell tool is pending confirms the tool never started.
+4. Silence is normal while a model turn runs. A long gap alone is not proof of a
+   hang; a pending tool call for many minutes is.
+
 ## Security
 
 The default permission preset is `full-access`: OmO can run any command and write
 anywhere with the Hermes user's privileges. Only use it for trusted work; pass
-`permission="workspace"` or `"accept-edits"` when the task should be narrower.
+`permission="workspace"` or `"accept-edits"` when the task should be narrower and
+does not need shell commands (see the headless deadlock above).

@@ -414,7 +414,7 @@ Böylece eski bir plan oturumuna yeni bir talimatla devam edilebilir.
 | `permission_default` | `full-access` | `permission` verilmezse kullanılır |
 | `allowed_roots` | `[]` | Boş = sınırsız; doluysa `cwd` bu köklerde olmalı |
 | `wait_timeout_s` | `90` | `omo_wait` varsayılanı (max 120) |
-| `auto_close` | `true` | `done` sonrası `close_session` |
+| `auto_close` | `false` | `true` ise `done` sonrası `close_session`; varsayılanda oturum `idle` kalır |
 | `host_socket` | `~/.omo/agent/rpc/rpc.sock` | Unix soket yolu |
 
 `__init__.py` ayrıca `ctx.register_skill("omo-orchestration", ...)` ile paket
