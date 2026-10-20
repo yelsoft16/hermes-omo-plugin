@@ -21,6 +21,9 @@ The plugin talks to OmO's RPC host (`~/.omo/agent/rpc/rpc.sock`) and starts it
 on demand with `omo host ensure`. Restart the Hermes gateway after installing
 or updating so the new module is loaded.
 
+`main` tracks development. Stable releases are GitHub Release tags (`v0.2.0`);
+development checkpoints are `-dev.N` tags and are not meant for production.
+
 ## Usage
 
 ```
@@ -33,7 +36,7 @@ Bundled skill: `omo:omo-orchestration`.
 
 ## Status and limitations
 
-- Version 0.2.0: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
+- Version 0.2.1-dev.1: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
   `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.
