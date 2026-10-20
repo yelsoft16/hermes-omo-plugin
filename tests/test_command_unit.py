@@ -75,6 +75,29 @@ class TestCommandSessions(HandlerTestCase):
         self.assertIn("son cevap metni", out)
         self.assertIn("untitled", out)
 
+    def test_resume_by_list_number_targets_the_newest_session(self):
+        self.add_session(session_id="omo-old", status="done")
+        self.add_session(session_id="omo-new", status="idle")
+        host = FakeHost()
+        with patch.object(tools, "_open_host", return_value=host):
+            out = tools.handle_command("resume 1 keep going")
+        self.assertEqual(out, "omo-new: running")
+        self.assertEqual(host.prompt_calls, [("rpc-1", "keep going")])
+
+    def test_resume_by_list_number_can_target_an_older_row(self):
+        self.add_session(session_id="omo-old", status="done")
+        self.add_session(session_id="omo-new", status="idle")
+        host = FakeHost()
+        with patch.object(tools, "_open_host", return_value=host):
+            out = tools.handle_command("resume 2 go on")
+        self.assertEqual(out, "omo-old: running")
+        self.assertEqual(host.prompt_calls, [("rpc-1", "go on")])
+
+    def test_resume_rejects_an_out_of_range_number(self):
+        self.add_session(session_id="omo-only", status="done")
+        out = tools.handle_command("resume 9")
+        self.assertIn("1..1", out)
+
     def test_status_without_any_session_says_so(self):
         self.assertEqual(tools.handle_command("status"), "No omo sessions.")
 

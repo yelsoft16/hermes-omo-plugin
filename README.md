@@ -6,7 +6,7 @@ Local Hermes plugin that drives OmO (oh-my-openagent) sessions over its RPC host
 - Wait for a question or completion: `omo_wait`
 - Answer a question: `omo_answer`
 - Control: `omo_status`, `omo_cancel`, `omo_resume`
-- Slash command: `/omo status|list|stop|new|resume <id>`
+- Slash command: `/omo status|list|stop|new|resume <n|id>`
 
 Design: `docs/specs/2026-10-19-omo-plugin-design.md`
 
@@ -37,7 +37,7 @@ Bundled skill: `omo:omo-orchestration`.
 
 ## Status and limitations
 
-- Version 0.2.1-dev.2: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
+- Version 0.2.1-dev.3: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
   `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.

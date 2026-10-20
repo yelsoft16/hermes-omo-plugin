@@ -425,7 +425,7 @@ skill'ini kaydeder; model `skill_view("omo:omo-orchestration")` ile yükler.
 - `/omo status` — aktif oturumun durumu
 - `/omo list` — son 10 oturum
 - `/omo stop` — aktif oturumu iptal et
-- `/omo resume <id>` — oturumu yeniden aç
+- `/omo resume <n|id> [mesaj]` — `/omo list` satır numarası veya id ile oturumu yeniden aç
 
 ---
 

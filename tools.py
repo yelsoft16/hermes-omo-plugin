@@ -465,7 +465,7 @@ def handle_resume(args: dict, **kwargs) -> str:
 
 
 USAGE = ("Usage: /omo status | /omo list | /omo stop | /omo new [--cwd PATH] "
-         "[--permission PRESET] [task] | /omo resume <id> [message]")
+         "[--permission PRESET] [task] | /omo resume <number|id> [message]")
 
 
 def _format_status(data: dict) -> str:
@@ -617,6 +617,12 @@ def handle_new(raw_args: str = "", **kwargs) -> str:
         return f"omo_new: {exc}"
 
 
+def _command_rows(store, hermes_sid: str) -> list:
+    """The same rows `/omo list` shows, so numbers match what the user sees."""
+    return (store.list_recent(hermes_sid, limit=10) if hermes_sid else []) \
+        or store.list_all(limit=10)
+
+
 def handle_command(raw_args: str, **kwargs) -> str:
     raw = (raw_args or "").strip()
     parts = raw.split()
@@ -633,8 +639,7 @@ def handle_command(raw_args: str, **kwargs) -> str:
         if sub == "list":
             store = get_store()
             hermes_sid = _command_hermes_sid(**kwargs)
-            rows = (store.list_recent(hermes_sid, limit=10) if hermes_sid else []) \
-                or store.list_all(limit=10)
+            rows = _command_rows(store, hermes_sid)
             if not rows:
                 return "No omo sessions."
             return f"OmO sessions ({len(rows)}):\n" + "\n".join(
@@ -651,8 +656,15 @@ def handle_command(raw_args: str, **kwargs) -> str:
             return handle_new(rest, **kwargs)
         if sub == "resume":
             if len(parts) < 2:
-                return "Usage: /omo resume <id> [message]"
-            payload = {"session_id": parts[1]}
+                return "Usage: /omo resume <number|id> [message]"
+            ref = parts[1]
+            if ref.isdigit():
+                rows = _command_rows(get_store(), _command_hermes_sid(**kwargs))
+                index = int(ref)
+                if not 1 <= index <= len(rows):
+                    return f"No session number {ref}; /omo list shows 1..{len(rows)}."
+                ref = rows[index - 1]["id"]
+            payload = {"session_id": ref}
             if len(parts) > 2:
                 payload["message"] = " ".join(parts[2:])
             data = json.loads(handle_resume(payload))
