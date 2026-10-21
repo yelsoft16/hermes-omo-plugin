@@ -265,6 +265,33 @@ class TestHandleStart(HandlerTestCase):
         self.assertEqual(host.closed_sessions, ["rpc-1"])
         self.assertEqual(self.store.list_recent("hermes-1"), [])
 
+    def test_workflow_prefixes_the_task_with_the_slash_command(self):
+        host = FakeHost()
+        out = self.start({"task": "review the plan", "workflow": "ulw-plan",
+                          "cwd": self._tmp.name}, host)
+        self.assertTrue(out["ok"])
+        self.assertEqual(host.prompt_calls, [("rpc-1", "/ulw-plan review the plan")])
+
+    def test_workflow_does_not_double_prefix_an_existing_command(self):
+        host = FakeHost()
+        out = self.start({"task": "/ulw-plan review the plan", "workflow": "ulw-plan",
+                          "cwd": self._tmp.name}, host)
+        self.assertTrue(out["ok"])
+        self.assertEqual(host.prompt_calls, [("rpc-1", "/ulw-plan review the plan")])
+
+    def test_unknown_workflow_is_rejected_before_opening_a_session(self):
+        host = FakeHost()
+        with patch.object(tools, "ensure_host") as ensure, \
+                patch.object(tools, "HostClient", return_value=host):
+            out = json.loads(tools.handle_start(
+                {"task": "do it", "workflow": "bogus", "cwd": self._tmp.name},
+                session_id="hermes-1"))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "omo_error")
+        self.assertIn("unsupported workflow", out["detail"])
+        self.assertEqual(host.open_calls, 0)
+        ensure.assert_not_called()
+
     def test_success_records_the_session(self):
         host = FakeHost()
         out = self.start({"task": "do it", "cwd": self._tmp.name}, host)

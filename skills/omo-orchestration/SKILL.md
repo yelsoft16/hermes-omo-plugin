@@ -106,10 +106,22 @@ your own. They silently disable parts of the skill.
 - If OmO asks "review/gap analysis?", relay it with `clarify`/`omo_answer`;
   never answer it on the user's behalf.
 
+## Session-scoped workflow gates
+
+Some OmO subagents (notably `plan-reviewer`) open only when the session's
+first prompt is the explicit slash command. A free-form "use ulw-plan"
+prompt does not open the gate, and `omo_resume` cannot reopen it.
+
+- Start workflow sessions with `workflow="ulw-plan"`, `"ulw-execute"`, or
+  `"mass-ulw"`; `omo_start` prefixes the slash command for you.
+- If OmO reports a plan-gated refusal, do not retry in that session. Start a
+  new session with `workflow="ulw-plan"` for review; the old session cannot be
+  repaired by resuming it.
+
 ## /ulw-plan recipe
 
 ```
-omo_start(task="/ulw-plan <request>", cwd="/home/frappe/frappe-bench")
+omo_start(task="<request>", workflow="ulw-plan", cwd="/home/frappe/frappe-bench")
 omo_wait(session_id)
 # question: intent / approval / change approach
 clarify(...)

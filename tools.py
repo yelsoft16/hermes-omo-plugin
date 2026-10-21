@@ -228,11 +228,34 @@ def _resolve(store: SessionStore, hermes_session_id: str, session_id: str | None
     return rec
 
 
+WORKFLOW_COMMANDS = ("ulw-plan", "ulw-execute", "mass-ulw")
+
+
+def _apply_workflow(task: str, workflow) -> str:
+    """Prefix a bare task with an explicit OmO workflow command.
+
+    Some OmO workflows (notably plan-reviewer) are gated on the session's
+    first prompt being the slash command. A free-form "use ulw-plan" prompt
+    does not open that gate, and the gate cannot be reopened on resume.
+    """
+    if not workflow:
+        return task
+    if not isinstance(workflow, str):
+        raise HostError("omo_error", "workflow must be a string")
+    name = workflow.strip().lstrip("/")
+    if name not in WORKFLOW_COMMANDS:
+        raise HostError("omo_error", "unsupported workflow: " + str(workflow))
+    if task.lstrip().startswith("/"):
+        return task
+    return "/" + name + " " + task
+
+
 def handle_start(args: dict, **kwargs) -> str:
     try:
         task = args.get("task")
         if not isinstance(task, str) or not task.strip():
             raise HostError("omo_error", "task is required")
+        task = _apply_workflow(task, args.get("workflow"))
         hermes_sid = kwargs.get("session_id") or ""
         store = get_store()
         running = store.active_for(hermes_sid)

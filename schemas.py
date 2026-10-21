@@ -12,6 +12,16 @@ OMO_START = {
         "type": "object",
         "properties": {
             "task": {"type": "string", "description": "Prompt or slash command, e.g. /ulw-plan ..."},
+            "workflow": {
+                "type": "string",
+                "enum": ["ulw-plan", "ulw-execute", "mass-ulw"],
+                "description": (
+                    "Optional explicit OmO workflow. Prefixes a bare task with the "
+                    "slash command. Required for workflows whose review gate is "
+                    "session-scoped (plan-reviewer), because resuming an old session "
+                    "cannot reopen it."
+                ),
+            },
             "cwd": {"type": "string", "description": "Absolute working directory"},
             "model": {"type": "string", "description": "Optional provider/id"},
             "permission": {"type": "string", "enum": PERMISSIONS},
