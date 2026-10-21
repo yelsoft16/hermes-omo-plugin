@@ -1,5 +1,5 @@
 name: omo
-version: 0.2.1-dev.7
+version: 0.2.1-dev.8
 description: "OmO (oh-my-openagent) RPC bridge: interactive omo sessions from Hermes."
 author: Selçuk ÇALIŞKAN
 requires_hermes: ">=0.21.5"

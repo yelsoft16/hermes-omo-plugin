@@ -87,6 +87,25 @@ one, call `omo_resume(session_id, message)`; for a new task, call `omo_start`.
   `omo_answer(session_id, request_id, answers={}, comment="no answer")` only when
   the question is optional; for approval gates, ask again.
 
+## Task contract (do not invent constraints)
+
+Pass only constraints the user stated. Never add prohibitions such as
+"dosya yazma YOK", "no file writes", or "kod yazma YOK" to an OmO task on
+your own. They silently disable parts of the skill.
+
+- "Plan only" (`ulw-plan`) means no implementation. The plan artifact
+  `.omo/plans/<slug>.md` is part of the skill and must be written by OmO.
+  If the user really wants no file writes, warn that this skips the plan
+  artifact and the review/gap-analysis gate, and get explicit confirmation.
+- After a plan settles, do not copy or create the plan yourself. Verify the
+  path OmO reports, keep the session open, and relay the plan's decisions
+  back to the same session with `omo_resume`.
+- For execution, pass only the deployment constraints the user approved
+  (for example no migrate/build/restart/commit). Those constraints never
+  suppress the plan artifact or the review gate.
+- If OmO asks "review/gap analysis?", relay it with `clarify`/`omo_answer`;
+  never answer it on the user's behalf.
+
 ## /ulw-plan recipe
 
 ```
@@ -95,7 +114,9 @@ omo_wait(session_id)
 # question: intent / approval / change approach
 clarify(...)
 omo_answer(session_id, request_id, answers)
-# repeat until done; verify the plan file path in the final text
+# repeat until done; the plan file (.omo/plans/<slug>.md) is OmO's output
+# if a review/gap-analysis question arrives, relay it; then send decisions
+# with omo_resume(session_id, message)
 ```
 
 ## New task vs resume
