@@ -35,9 +35,14 @@ omo_wait(session_id)
 
 Bundled skill: `omo:omo-orchestration`.
 
+Prompt quality: use the Goal/Context/Scope/Acceptance/Verification brief in
+`references/task-prompt-template.md`. Do not add `PLAN YOK` or similar
+meta-negations; `omo_start(workflow="mass-ulw", ...)` lets mass-ulw choose its
+DAG and agent fan-out.
+
 ## Status and limitations
 
-- Version 0.2.1-dev.10: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
+- Version 0.2.1-dev.11: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
   `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.
@@ -67,7 +72,7 @@ Bundled skill: `omo:omo-orchestration`.
 Tests:
 
 ```bash
-python3 -m unittest discover -s tests -t . -v   # 98 tests, 3 skipped
+python3 -m unittest discover -s tests -t . -v   # 118 tests, 3 skipped
 OMO_INTEGRATION=1 python3 -m unittest tests.test_host_integration -v
 ```
 

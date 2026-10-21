@@ -1,6 +1,6 @@
 ---
 name: omo-orchestration
-description: "Use when delegating an interactive task to OmO (oh-my-openagent): /ulw-plan, /ulw-execute, ultrawork, or any omo session that may ask questions. Covers start, wait, clarify, answer, and resume."
+description: "Use when delegating an interactive task to OmO (oh-my-openagent): /ulw-plan, /ulw-execute, /mass-ulw, ultrawork, or any omo session that may ask questions. Covers prompt quality, start, wait, clarify, answer, and resume."
 ---
 
 # OmO orchestration
@@ -89,9 +89,11 @@ one, call `omo_resume(session_id, message)`; for a new task, call `omo_start`.
 
 ## Task contract (do not invent constraints)
 
-Pass only constraints the user stated. Never add prohibitions such as
-"dosya yazma YOK", "no file writes", or "kod yazma YOK" to an OmO task on
-your own. They silently disable parts of the skill.
+Pass only constraints the user stated. Never add meta-negations such as
+"PLAN YOK", "plan yazma", "review yok", "agent kullanma", "dosya yazma YOK",
+"no file writes", or "kod yazma YOK" to an OmO task on your own. They silently
+disable parts of the skill: planning, the review gate, or agent fan-out.
+Use positive scope instead ("implement X; no live DB writes").
 
 - "Plan only" (`ulw-plan`) means no implementation. The plan artifact
   `.omo/plans/<slug>.md` is part of the skill and must be written by OmO.
@@ -105,6 +107,48 @@ your own. They silently disable parts of the skill.
   suppress the plan artifact or the review gate.
 - If OmO asks "review/gap analysis?", relay it with `clarify`/`omo_answer`;
   never answer it on the user's behalf.
+
+## Writing the task prompt
+
+A good OmO prompt is a compact brief, not a list of prohibitions. Use
+`references/task-prompt-template.md` for every non-trivial task, especially
+`mass-ulw`.
+
+Minimum sections: Goal, Context, Scope, Acceptance criteria, Verification.
+
+- Goal: one observable outcome.
+- Context: repo/app/branch, current vs desired behavior, key files, DocTypes,
+  APIs, and concrete identifiers.
+- Scope: what is in; out-of-scope only if the user stated it.
+- Acceptance criteria: numbered and testable; include exact test commands.
+- Verification: what OmO must report (files, commands and exit codes, skipped
+  tests, remaining risks).
+
+Let `mass-ulw` choose its DAG. Do not prescribe agent counts or lanes. If
+parallel work is wanted, say "parallelize independent parts" as a positive
+instruction. For a small task, say "use a single agent if that is faster".
+
+Never add `PLAN YOK`, `plan yazma`, `review yok`, `agent kullanma`, or
+`dosya yazma yok` by default; those disable the skill's planning, review, or
+fan-out. Real guardrails belong in `## Constraints` and must be specific
+(for example "no live DB writes", "no migrate/build/restart", "do not touch
+core").
+
+## mass-ulw recipe
+
+```
+omo_start(
+    task="<brief from references/task-prompt-template.md>",
+    workflow="mass-ulw",
+    cwd="/home/frappe/frappe-bench",
+)
+omo_wait(session_id)
+# question -> clarify + omo_answer
+# done -> report; session stays idle
+```
+
+If the task text already starts with `mass-ulw`, the plugin does not add a
+second prefix. Do not also add a separate `/mass-ulw` command.
 
 ## Session-scoped workflow gates
 

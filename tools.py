@@ -245,8 +245,12 @@ def _apply_workflow(task: str, workflow) -> str:
     name = workflow.strip().lstrip("/")
     if name not in WORKFLOW_COMMANDS:
         raise HostError("omo_error", "unsupported workflow: " + str(workflow))
-    if task.lstrip().startswith("/"):
+    stripped = task.lstrip()
+    if stripped.startswith("/"):
         return task
+    first = stripped.split(None, 1)
+    if first and first[0] == name:
+        return "/" + stripped
     return "/" + name + " " + task
 
 

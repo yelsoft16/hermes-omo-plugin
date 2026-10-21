@@ -279,6 +279,13 @@ class TestHandleStart(HandlerTestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(host.prompt_calls, [("rpc-1", "/ulw-plan review the plan")])
 
+    def test_workflow_does_not_double_prefix_a_bare_workflow_token(self):
+        host = FakeHost()
+        out = self.start({"task": "mass-ulw implement X", "workflow": "mass-ulw",
+                          "cwd": self._tmp.name}, host)
+        self.assertTrue(out["ok"])
+        self.assertEqual(host.prompt_calls, [("rpc-1", "/mass-ulw implement X")])
+
     def test_unknown_workflow_is_rejected_before_opening_a_session(self):
         host = FakeHost()
         with patch.object(tools, "ensure_host") as ensure, \

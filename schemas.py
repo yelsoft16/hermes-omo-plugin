@@ -11,7 +11,11 @@ OMO_START = {
     "parameters": {
         "type": "object",
         "properties": {
-            "task": {"type": "string", "description": "Prompt or slash command, e.g. /ulw-plan ..."},
+            "task": {"type": "string", "description": (
+                "Prompt or slash command. For multi-step work, use the "
+                "Goal/Context/Scope/Acceptance/Verification brief from the "
+                "omo-orchestration skill; avoid meta-negations like 'PLAN YOK'."
+            )},
             "workflow": {
                 "type": "string",
                 "enum": ["ulw-plan", "ulw-execute", "mass-ulw"],
