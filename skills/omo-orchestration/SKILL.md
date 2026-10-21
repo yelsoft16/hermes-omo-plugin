@@ -118,6 +118,18 @@ prompt does not open the gate, and `omo_resume` cannot reopen it.
   new session with `workflow="ulw-plan"` for review; the old session cannot be
   repaired by resuming it.
 
+## No wall-clock deadlines for OmO lanes
+
+OmO owns the RPC lifecycle. Never cancel an OmO subagent, lane, or turn with
+your own timer. A long-running lane is not a failure; silence is not a hang.
+Wait for OmO's completion or terminal error and relay it.
+
+- Do not say "2 minutes then cancel" or set an arbitrary deadline.
+- Cancel only when the user explicitly asks, or when OmO returns a terminal
+  error that requires a new session.
+- If the user asks for status, report elapsed time and the last event; do not
+  turn that into a cancellation.
+
 ## /ulw-plan recipe
 
 ```
