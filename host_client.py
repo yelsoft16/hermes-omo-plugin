@@ -106,19 +106,6 @@ def host_status(socket_path: str | None = None, timeout: int = 15) -> dict:
     return data
 
 
-# OmO 5.1.62+ cold start dies in the supervisor bootstrap before the host can
-# answer get_protocol_info. The child closes fd 0, fails to reopen /dev/fd/0,
-# then writes that warning to a duplicated stderr fd that was already closed
-# and reused as an eventfd; 82 bytes to an eventfd is EINVAL, and the unhandled
-# write error kills the host. The host CLI itself is healthy.
-_BOOTSTRAP_CRASH_MARKERS = ("before answering get_protocol_info", "EINVAL")
-
-
-def _looks_like_bootstrap_crash(exc: HostError) -> bool:
-    detail = f"{exc.detail} {exc}"
-    return all(marker in detail for marker in _BOOTSTRAP_CRASH_MARKERS)
-
-
 def _direct_host_log() -> str:
     directory = os.path.expanduser("~/.omo/agent/logs")
     os.makedirs(directory, exist_ok=True)
@@ -172,6 +159,14 @@ def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
     omo = shutil.which("omo")
     if not omo:
         raise HostError("host_unavailable", "omo binary not found", "Install omo")
+    # OmO 5.1.62/5.1.64 crash the supervisor bootstrap on every cold start
+    # (EINVAL in the host child before readiness). Start the host child
+    # directly first; the supported path stays as the fallback for a runtime
+    # whose host CLI no longer accepts this invocation.
+    try:
+        return _start_host_directly(socket_path, timeout=max(45, timeout))
+    except HostError as direct_exc:
+        direct_error = direct_exc
     args = [omo, "host", "ensure", "--json"]
     if socket_path:
         args += ["--socket", socket_path]
@@ -186,15 +181,6 @@ def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
             return _host_cmd(args, max(1, int(deadline - time.monotonic())))
         except HostError as exc:
             last = exc
-            if _looks_like_bootstrap_crash(exc):
-                try:
-                    return _start_host_directly(socket_path,
-                                                timeout=max(45, timeout))
-                except HostError as direct_exc:
-                    raise HostError(
-                        "host_unavailable",
-                        f"{exc.detail}; direct launch failed: {direct_exc.detail}",
-                        "Run: omo host ensure") from direct_exc
             time.sleep(1)
             try:
                 status = host_status(socket_path, timeout=5)
@@ -203,7 +189,9 @@ def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
             if status.get("reachable"):
                 return status
     assert last is not None
-    raise last
+    raise HostError("host_unavailable",
+                    f"{last.detail}; direct launch failed: {direct_error.detail}",
+                    last.hint or "Run: omo host ensure")
 
 
 def check_protocol(info: dict) -> None:

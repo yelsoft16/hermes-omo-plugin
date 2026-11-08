@@ -42,19 +42,18 @@ DAG and agent fan-out.
 
 ## Status and limitations
 
-- Version 0.2.2-dev.3: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
+- Version 0.2.2-dev.4: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
   `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.
 - Requires OmO 5.1.35 (protocolVersion 1) and a reachable host socket
-  (`~/.omo/agent/rpc/rpc.sock` by default). `omo host ensure` runs on demand;
-  a cold start that misses the CLI's own readiness window is retried once.
-- OmO 5.1.62/5.1.64 can crash the RPC host during a cold start in Bun bootstrap
+  (`~/.omo/agent/rpc/rpc.sock` by default).
+- OmO 5.1.62/5.1.64 crash the supervisor bootstrap on every cold start
   (`EINVAL: invalid argument, write`; a reused eventfd receives the stdin-lifetime
-  warning). The plugin detects that signature and starts the same host child
-  directly (`omo --mode rpc --multi-session --listen unix://...`), so sessions keep
-  working; the supported `omo host ensure` path stays primary and is used whenever
-  it succeeds.
+  warning). The plugin starts the host child directly first
+  (`omo --mode rpc --multi-session --listen unix://...`, measured 13.6 s) and falls
+  back to `omo host ensure` only if that invocation fails. The direct host has no
+  supervisor: it exits when empty and the plugin cold-starts it on demand.
 - OmO 5.1.6x `socket_auth`: the client probes with `get_protocol_info` +
   `auth.client_nonce`, verifies the server proof against the per-launch key at
   `<agentDir>/rpc/keys/<launch_id>`, and sends `authenticate` before any other

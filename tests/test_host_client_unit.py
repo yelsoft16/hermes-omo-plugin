@@ -375,9 +375,24 @@ class TestHostCommandErrors(unittest.TestCase):
             host_client.host_status()
         self.assertEqual(ctx.exception.code, "host_unavailable")
 
+    @mock.patch("omo.host_client._start_host_directly")
     @mock.patch("omo.host_client.subprocess.run")
     @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
-    def test_ensure_host_starts_when_status_reports_down(self, _which, run):
+    def test_ensure_host_starts_directly_before_the_supported_path(
+            self, _which, run, direct):
+        down = subprocess.CompletedProcess(args=[], returncode=3,
+                                           stdout='{"reachable": false}', stderr="")
+        run.side_effect = [down]
+        direct.return_value = {"reachable": True, "pid": 9}
+        self.assertEqual(host_client.ensure_host().get("pid"), 9)
+        direct.assert_called_once()
+        self.assertEqual(run.call_count, 1, "ensure must not run before the direct start")
+
+    @mock.patch("omo.host_client._start_host_directly",
+                side_effect=HostError("host_unavailable", "direct down"))
+    @mock.patch("omo.host_client.subprocess.run")
+    @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
+    def test_ensure_host_falls_back_to_the_supported_path(self, _which, run, _direct):
         down = subprocess.CompletedProcess(args=[], returncode=3,
                                            stdout='{"reachable": false}', stderr="")
         up = subprocess.CompletedProcess(args=[], returncode=0,
@@ -386,9 +401,12 @@ class TestHostCommandErrors(unittest.TestCase):
         self.assertEqual(host_client.ensure_host().get("pid"), 9)
         self.assertEqual(run.call_args_list[1].args[0][1:3], ["host", "ensure"])
 
+    @mock.patch("omo.host_client._start_host_directly",
+                side_effect=HostError("host_unavailable", "direct down"))
     @mock.patch("omo.host_client.subprocess.run")
     @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
-    def test_ensure_host_retries_when_cold_start_misses_its_window(self, _which, run):
+    def test_ensure_host_retries_when_cold_start_misses_its_window(
+            self, _which, run, _direct):
         down = subprocess.CompletedProcess(args=[], returncode=3,
                                            stdout='{"reachable": false}', stderr="")
         up = subprocess.CompletedProcess(args=[], returncode=0,
@@ -398,22 +416,6 @@ class TestHostCommandErrors(unittest.TestCase):
                            down, up]
         self.assertEqual(host_client.ensure_host().get("pid"), 9)
         self.assertEqual(run.call_args_list[-1].args[0][1:3], ["host", "ensure"])
-
-    @mock.patch("omo.host_client._start_host_directly")
-    @mock.patch("omo.host_client.subprocess.run")
-    @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
-    def test_ensure_host_falls_back_to_direct_launch_on_bootstrap_crash(
-            self, _which, run, direct):
-        down = subprocess.CompletedProcess(args=[], returncode=3,
-                                           stdout='{"reachable": false}', stderr="")
-        crashed = subprocess.CompletedProcess(args=[], returncode=1, stdout=(
-            '{"action":"error","reason":"host_error","detail":"RPC socket host exited '
-            'with code 1 before answering get_protocol_info\\nEINVAL: invalid argument, '
-            'write"}'), stderr="")
-        run.side_effect = [down, crashed]
-        direct.return_value = {"reachable": True, "pid": 9}
-        self.assertEqual(host_client.ensure_host().get("pid"), 9)
-        direct.assert_called_once()
 
     @mock.patch("omo.host_client.time.sleep")
     @mock.patch("omo.host_client.host_status")
@@ -434,9 +436,11 @@ class TestHostCommandErrors(unittest.TestCase):
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
+    @mock.patch("omo.host_client._start_host_directly",
+                side_effect=HostError("host_unavailable", "direct down"))
     @mock.patch("omo.host_client.subprocess.run")
     @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
-    def test_ensure_host_maps_timeout(self, _which, run):
+    def test_ensure_host_maps_timeout(self, _which, run, _direct):
         status = subprocess.CompletedProcess(args=[], returncode=0,
                                              stdout='{"reachable": false}', stderr="")
         down = subprocess.CompletedProcess(args=[], returncode=3,
