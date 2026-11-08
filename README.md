@@ -42,7 +42,7 @@ DAG and agent fan-out.
 
 ## Status and limitations
 
-- Version 0.2.2-dev.2: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
+- Version 0.2.2-dev.3: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
   `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.
@@ -55,6 +55,11 @@ DAG and agent fan-out.
   directly (`omo --mode rpc --multi-session --listen unix://...`), so sessions keep
   working; the supported `omo host ensure` path stays primary and is used whenever
   it succeeds.
+- OmO 5.1.6x `socket_auth`: the client probes with `get_protocol_info` +
+  `auth.client_nonce`, verifies the server proof against the per-launch key at
+  `<agentDir>/rpc/keys/<launch_id>`, and sends `authenticate` before any other
+  command. Hosts that return no challenge keep the legacy first frame. Verified
+  against a host started with `SENPI_RPC_REQUIRE_TOKEN=1`.
 - Default permission preset is `full-access`; the security warning and the
   restricted-preset guidance live in the bundled skill.
 - Sessions stay open after a settled turn. `omo_wait` reports `status=done` for

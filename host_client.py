@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
+import re
+import secrets
 import select
 import shutil
 import socket
+import stat
 import subprocess
 import time
 from collections import deque
@@ -224,14 +229,74 @@ def parse_open_response(resp: dict, fallback_path: str | None = None) -> OpenRes
     )
 
 
+_HEX64 = re.compile(r"^[a-f0-9]{64}$")
+_LAUNCH_ID = re.compile(
+    r"^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$")
+
+
+def _is_private_dir(path: str, exact_mode: int | None = None) -> bool:
+    """A client-owned, non-symlink directory with no group/other write bits."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        return False
+    if st.st_uid != os.getuid() or st.st_mode & 0o022:
+        return False
+    return exact_mode is None or stat.S_IMODE(st.st_mode) == exact_mode
+
+
+def read_endpoint_record(agent_dir: str, launch_id: str) -> dict:
+    """Read and validate `<agentDir>/rpc/keys/<launch_id>` (OmO socket_auth)."""
+    if not _LAUNCH_ID.match(launch_id or ""):
+        raise HostError("host_identity_unproven", f"malformed launch id: {launch_id!r}")
+    rpc_dir = os.path.join(agent_dir, "rpc")
+    keys_dir = os.path.join(rpc_dir, "keys")
+    if not (_is_private_dir(agent_dir) and _is_private_dir(rpc_dir)
+            and _is_private_dir(keys_dir, exact_mode=0o700)):
+        raise HostError("unsafe_key_record",
+                        f"unsafe endpoint key directory under {agent_dir}")
+    path = os.path.join(keys_dir, launch_id)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise HostError("unsafe_key_record",
+                        f"endpoint key record unreadable: {exc}") from exc
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                or stat.S_IMODE(st.st_mode) != 0o600):
+            raise HostError("unsafe_key_record",
+                            "endpoint key record is not a 0600 user file")
+        raw = os.read(fd, 65536)
+    finally:
+        os.close(fd)
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HostError("unsafe_key_record",
+                        "endpoint key record is not JSON") from exc
+    if (not isinstance(record, dict) or record.get("version") != 1
+            or record.get("launch_id") != launch_id
+            or not isinstance(record.get("key"), str)
+            or not _HEX64.match(record["key"])):
+        raise HostError("unsafe_key_record",
+                        "endpoint key record has the wrong shape")
+    return record
+
+
 class HostClient:
-    def __init__(self, socket_path: str | None = None, connect_timeout: float = 5.0) -> None:
+    def __init__(self, socket_path: str | None = None, connect_timeout: float = 5.0,
+                 key_root: str | None = None) -> None:
         self.socket_path = socket_path or default_socket_path()
         self._connect_timeout = connect_timeout
+        self.key_root = key_root or os.path.expanduser("~/.omo/agent")
         self._sock: socket.socket | None = None
         self._buf = JsonlBuffer()
         self._pending: deque[dict] = deque()
         self._seq = 0
+        self._protocol: dict | None = None
 
     def __enter__(self) -> "HostClient":
         self.connect()
@@ -249,14 +314,21 @@ class HostClient:
             sock.close()
             raise HostError("host_unavailable", str(exc), "Run: omo host ensure") from exc
         sock.settimeout(None)
-        self.attach_socket(sock)
+        try:
+            self.attach_socket(sock, handshake=False)
+            self._handshake()
+        except Exception:
+            self.close()
+            raise
 
-    def attach_socket(self, sock: socket.socket) -> None:
+    def attach_socket(self, sock: socket.socket, handshake: bool = True) -> None:
         self._sock = sock
         self._buf = JsonlBuffer()
         self._pending.clear()
-        self._send({"id": "ci", "type": "set_client_info", "width": 100,
-                    "capabilities": ["question"]})
+        self._protocol = None
+        if handshake:
+            self._send({"id": "ci", "type": "set_client_info", "width": 100,
+                        "capabilities": ["question"]})
 
     def close(self) -> None:
         if self._sock is not None:
@@ -264,6 +336,54 @@ class HostClient:
                 self._sock.close()
             finally:
                 self._sock = None
+        self._protocol = None
+
+    def _handshake(self) -> None:
+        """Probe the host and prove the per-launch endpoint key when challenged.
+
+        OmO 5.1.6x advertises `socket_auth` and returns a challenge on the
+        first protocol probe; older hosts ignore the extra `auth` field and
+        answer normally, so one first frame works for both.
+        """
+        client_nonce = secrets.token_hex(32)
+        resp, _ = self.request({"type": "get_protocol_info",
+                                "auth": {"client_nonce": client_nonce}},
+                               timeout=10)
+        data = resp.get("data") or {}
+        challenge = data.get("auth")
+        if isinstance(challenge, dict):
+            self._prove_endpoint_key(data, challenge, client_nonce)
+        self._protocol = data
+        self._send({"id": "ci", "type": "set_client_info", "width": 100,
+                    "capabilities": ["question"]})
+
+    def _prove_endpoint_key(self, data: dict, challenge: dict,
+                            client_nonce: str) -> None:
+        launch_id = challenge.get("launch_id")
+        server_nonce = challenge.get("server_nonce")
+        server_proof = challenge.get("server_proof")
+        if not (isinstance(launch_id, str) and _LAUNCH_ID.match(launch_id)
+                and isinstance(server_nonce, str) and _HEX64.match(server_nonce)
+                and isinstance(server_proof, str) and _HEX64.match(server_proof)):
+            raise HostError("host_identity_unproven",
+                            "malformed endpoint authentication challenge")
+        record = read_endpoint_record(data.get("agentDir") or self.key_root, launch_id)
+        key = bytes.fromhex(record["key"])
+        expected = hmac.new(
+            key,
+            "\n".join(("senpi-rpc-server", launch_id, client_nonce,
+                       server_nonce)).encode("utf-8"),
+            hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, bytes.fromhex(server_proof)):
+            raise HostError("host_identity_unproven",
+                            f"server proof mismatch for launch {launch_id}")
+        client_proof = hmac.new(
+            key,
+            "\n".join(("senpi-rpc-client", launch_id, server_nonce,
+                       client_nonce)).encode("utf-8"),
+            hashlib.sha256).hexdigest()
+        self.request({"type": "authenticate", "client_proof": client_proof},
+                     timeout=10)
 
     def _next_id(self, prefix: str) -> str:
         self._seq += 1
@@ -321,6 +441,8 @@ class HostClient:
         raise HostError("timeout", f"no response for {payload['type']}")
 
     def protocol_info(self) -> dict:
+        if self._protocol is not None:
+            return self._protocol
         resp, _ = self.request({"type": "get_protocol_info"}, timeout=10)
         return resp.get("data") or {}
 

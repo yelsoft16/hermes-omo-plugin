@@ -1,8 +1,11 @@
+import hashlib
+import hmac
 import json
 import os
 import socket
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -15,6 +18,16 @@ from omo.host_client import (
     default_socket_path,
     parse_open_response,
 )
+
+
+def read_frame(conn: socket.socket) -> dict:
+    data = b""
+    while b"\n" not in data:
+        chunk = conn.recv(65536)
+        if not chunk:
+            raise AssertionError("peer closed before a full frame arrived")
+        data += chunk
+    return json.loads(data.split(b"\n", 1)[0])
 
 
 def response(rid: str, data: dict | None = None, success: bool = True,
@@ -107,24 +120,42 @@ class TestHostClient(unittest.TestCase):
         self.assertEqual(self.handshake["type"], "set_client_info")
         self.assertEqual(self.handshake["capabilities"], ["question"])
 
-    def test_connect_uses_unix_socket_and_sends_handshake(self):
+    def test_connect_probes_then_sends_handshake(self):
         with tempfile.TemporaryDirectory() as tmp:
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             path = os.path.join(tmp, "rpc.sock")
             listener.bind(path)
             listener.listen(1)
             host = HostClient(socket_path=path)
-            try:
-                host.connect()
-                conn, _ = listener.accept()
+            errors: list[Exception] = []
+
+            def connect() -> None:
                 try:
-                    data = b""
-                    while b"\n" not in data:
-                        data += conn.recv(65536)
-                    frame = json.loads(data.split(b"\n", 1)[0])
-                finally:
-                    conn.close()
-                self.assertEqual(frame["type"], "set_client_info")
+                    host.connect()
+                except Exception as exc:  # noqa: BLE001 - surfaced below
+                    errors.append(exc)
+
+            thread = threading.Thread(target=connect)
+            thread.start()
+            conn, _ = listener.accept()
+            try:
+                probe = read_frame(conn)
+                self.assertEqual(probe["type"], "get_protocol_info")
+                self.assertEqual(len(probe["auth"]["client_nonce"]), 64)
+                conn.sendall((json.dumps({
+                    "id": probe["id"], "type": "response",
+                    "command": "get_protocol_info", "success": True,
+                    "data": {"protocolVersion": 1,
+                             "capabilities": ["multi_session"]},
+                }) + "\n").encode())
+                handshake = read_frame(conn)
+                self.assertEqual(handshake["type"], "set_client_info")
+            finally:
+                conn.close()
+            thread.join(timeout=5)
+            try:
+                self.assertFalse(thread.is_alive(), "connect stayed blocked")
+                self.assertEqual(errors, [])
             finally:
                 host.close()
                 listener.close()
@@ -223,6 +254,90 @@ class TestHostClient(unittest.TestCase):
             self.host.get_state("missing")
         self.assertEqual(ctx.exception.code, "session_not_found")
         self.assertEqual(ctx.exception.detail, "no such session")
+
+
+class TestEndpointAuth(unittest.TestCase):
+    LAUNCH = "67a4bfb1-2992-4291-82f1-23b7b1ea3de6"
+
+    def make_record(self, root: str, *, mode: int = 0o600,
+                    key_hex: str = "ab" * 32) -> tuple[str, dict]:
+        agent = os.path.join(root, "agent")
+        keys = os.path.join(agent, "rpc", "keys")
+        os.makedirs(keys)
+        os.chmod(agent, 0o755)
+        os.chmod(os.path.join(agent, "rpc"), 0o755)
+        os.chmod(keys, 0o700)
+        record = {"version": 1, "launch_id": self.LAUNCH, "key": key_hex,
+                  "pid": os.getpid(), "process_start": None,
+                  "endpoint": "/tmp/rpc.sock",
+                  "created_at": "2026-01-01T00:00:00Z"}
+        path = os.path.join(keys, self.LAUNCH)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(record, fh)
+        os.chmod(path, mode)
+        return agent, record
+
+    def test_read_endpoint_record_rejects_wide_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent, _ = self.make_record(tmp, mode=0o644)
+            with self.assertRaises(HostError) as ctx:
+                host_client.read_endpoint_record(agent, self.LAUNCH)
+            self.assertEqual(ctx.exception.code, "unsafe_key_record")
+
+    def test_prove_endpoint_key_sends_the_client_proof(self):
+        client_nonce = "11" * 32
+        server_nonce = "22" * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            agent, record = self.make_record(tmp)
+            key = bytes.fromhex(record["key"])
+            server_proof = hmac.new(
+                key, "\n".join(["senpi-rpc-server", self.LAUNCH,
+                                client_nonce, server_nonce]).encode(),
+                hashlib.sha256).hexdigest()
+            expected = hmac.new(
+                key, "\n".join(["senpi-rpc-client", self.LAUNCH,
+                                server_nonce, client_nonce]).encode(),
+                hashlib.sha256).hexdigest()
+            host = HostClient()
+            sent: dict = {}
+
+            def request(payload, timeout=15, keep_extra=True):
+                sent.update(payload)
+                return {"success": True, "data": {}}, []
+
+            host.request = request
+            host._prove_endpoint_key(
+                {"agentDir": agent},
+                {"launch_id": self.LAUNCH, "server_nonce": server_nonce,
+                 "server_proof": server_proof},
+                client_nonce)
+            self.assertEqual(sent["type"], "authenticate")
+            self.assertEqual(sent["client_proof"], expected)
+
+    def test_prove_endpoint_key_rejects_a_wrong_server_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent, _ = self.make_record(tmp)
+            host = HostClient()
+            host.request = lambda *a, **k: self.fail("sent a command before proving the host")
+            with self.assertRaises(HostError) as ctx:
+                host._prove_endpoint_key(
+                    {"agentDir": agent},
+                    {"launch_id": self.LAUNCH, "server_nonce": "22" * 32,
+                     "server_proof": "33" * 32},
+                    "11" * 32)
+            self.assertEqual(ctx.exception.code, "host_identity_unproven")
+
+    def test_handshake_without_a_challenge_keeps_the_legacy_frame(self):
+        host = HostClient()
+        sent: list[dict] = []
+        host.request = lambda payload, timeout=15, keep_extra=True: (
+            {"success": True, "data": {"protocolVersion": 1,
+                                       "capabilities": ["multi_session"]}}, [])
+        host._send = sent.append
+        host._handshake()
+        self.assertEqual(sent[-1]["type"], "set_client_info")
+        self.assertEqual(host.protocol_info()["protocolVersion"], 1)
 
 
 class TestHostCommandErrors(unittest.TestCase):
