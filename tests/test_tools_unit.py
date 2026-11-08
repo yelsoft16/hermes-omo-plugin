@@ -185,6 +185,9 @@ class HandlerTestCase(unittest.TestCase):
         ctx_patch = patch.object(tools, "_CTX", None)
         ctx_patch.start()
         self.addCleanup(ctx_patch.stop)
+        model_patch = patch.object(tools, "_default_model", return_value=(None, None))
+        model_patch.start()
+        self.addCleanup(model_patch.stop)
 
     def add_session(self, status="running", session_path="/tmp/omo-session.json",
                     omo_session_id="rpc-1", durable_session_id="durable-1",
@@ -334,6 +337,48 @@ class TestHandleStart(HandlerTestCase):
         self.assertEqual(out["error"], "session_running")
         client.assert_not_called()
         ensure.assert_not_called()
+
+
+    def test_start_uses_the_omo_default_model_when_none_is_given(self):
+        host = FakeHost()
+        with patch.object(tools, "_default_model",
+                          return_value=("omniroute", "glm-5.3-flash")):
+            out = self.start({"task": "do it", "cwd": self._tmp.name}, host)
+        self.assertTrue(out["ok"])
+        self.assertEqual(host.open_kwargs["provider"], "omniroute")
+        self.assertEqual(host.open_kwargs["model_id"], "glm-5.3-flash")
+
+    def test_start_pairs_a_bare_model_with_the_default_provider(self):
+        host = FakeHost()
+        with patch.object(tools, "_default_model",
+                          return_value=("omniroute", "glm-5.3-flash")):
+            out = self.start({"task": "do it", "cwd": self._tmp.name,
+                              "model": "glm-5.3"}, host)
+        self.assertTrue(out["ok"])
+        self.assertEqual(host.open_kwargs["provider"], "omniroute")
+        self.assertEqual(host.open_kwargs["model_id"], "glm-5.3")
+
+    def test_start_keeps_an_explicit_provider_model(self):
+        host = FakeHost()
+        out = self.start({"task": "do it", "cwd": self._tmp.name,
+                          "model": "other/model-x"}, host)
+        self.assertTrue(out["ok"])
+        self.assertEqual(host.open_kwargs["provider"], "other")
+        self.assertEqual(host.open_kwargs["model_id"], "model-x")
+
+
+class TestDefaultModel(unittest.TestCase):
+    def test_reads_default_provider_and_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "settings.json"), "w", encoding="utf-8") as fh:
+                json.dump({"defaultProvider": "omniroute",
+                           "defaultModel": "glm-5.3-flash"}, fh)
+            self.assertEqual(tools._default_model(tmp),
+                             ("omniroute", "glm-5.3-flash"))
+
+    def test_missing_settings_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(tools._default_model(tmp), (None, None))
 
 
 class TestHandleWait(HandlerTestCase):

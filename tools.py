@@ -69,6 +69,40 @@ def _split_model(model: str | None) -> tuple[str | None, str | None]:
     return None, model
 
 
+def _default_model(agent_dir: str | None = None) -> tuple[str | None, str | None]:
+    """The model OmO itself opens with: settings.json defaultProvider/defaultModel."""
+    root = (agent_dir or os.environ.get("OMO_AGENT_DIR")
+            or os.path.expanduser("~/.omo/agent"))
+    try:
+        with open(os.path.join(root, "settings.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    provider = data.get("defaultProvider")
+    model = data.get("defaultModel")
+    if isinstance(provider, str) and provider and isinstance(model, str) and model:
+        return provider, model
+    return None, None
+
+
+def _start_model(model: str | None,
+                 agent_dir: str | None = None) -> tuple[str | None, str | None]:
+    """Resolve omo_start's model, filling gaps from OmO's own default.
+
+    Passing the default explicitly makes the RPC session keep that model:
+    OmO's daily-normal profile skips sessions whose model was chosen
+    explicitly (provenance cli/scoped), so the TUI and the plugin agree.
+    """
+    provider, model_id = _split_model(model)
+    if model_id is None:
+        return _default_model(agent_dir)
+    if provider is None:
+        provider = _default_model(agent_dir)[0]
+    return provider, model_id
+
+
 def _validate_permission(permission: str) -> None:
     if permission not in schemas.PERMISSIONS:
         raise HostError("invalid_permission",
@@ -269,12 +303,13 @@ def handle_start(args: dict, **kwargs) -> str:
         cwd = _resolve_cwd(args.get("cwd"))
         permission = args.get("permission") or _cfg("permission_default", "full-access")
         _validate_permission(permission)
-        provider, model_id = _split_model(args.get("model"))
         sid = new_session_id()
         opened = None
         ensure_host(_socket_path())
         with HostClient(_socket_path()) as host:
-            check_protocol(host.protocol_info())
+            info = host.protocol_info()
+            check_protocol(info)
+            provider, model_id = _start_model(args.get("model"), info.get("agentDir"))
             opened = host.open_session(cwd=cwd,
                                        name=args.get("name") or f"hermes-{sid}",
                                        permission=permission,
