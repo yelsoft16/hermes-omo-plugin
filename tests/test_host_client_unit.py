@@ -284,6 +284,41 @@ class TestHostCommandErrors(unittest.TestCase):
         self.assertEqual(host_client.ensure_host().get("pid"), 9)
         self.assertEqual(run.call_args_list[-1].args[0][1:3], ["host", "ensure"])
 
+    @mock.patch("omo.host_client._start_host_directly")
+    @mock.patch("omo.host_client.subprocess.run")
+    @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
+    def test_ensure_host_falls_back_to_direct_launch_on_bootstrap_crash(
+            self, _which, run, direct):
+        down = subprocess.CompletedProcess(args=[], returncode=3,
+                                           stdout='{"reachable": false}', stderr="")
+        crashed = subprocess.CompletedProcess(args=[], returncode=1, stdout=(
+            '{"action":"error","reason":"host_error","detail":"RPC socket host exited '
+            'with code 1 before answering get_protocol_info\\nEINVAL: invalid argument, '
+            'write"}'), stderr="")
+        run.side_effect = [down, crashed]
+        direct.return_value = {"reachable": True, "pid": 9}
+        self.assertEqual(host_client.ensure_host().get("pid"), 9)
+        direct.assert_called_once()
+
+    @mock.patch("omo.host_client.time.sleep")
+    @mock.patch("omo.host_client.host_status")
+    @mock.patch("omo.host_client._direct_host_log")
+    @mock.patch("omo.host_client.subprocess.Popen")
+    @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
+    def test_direct_launch_runs_the_supervisor_child_command(
+            self, _which, popen, log, status, _sleep):
+        with tempfile.TemporaryDirectory() as tmp:
+            log.return_value = os.path.join(tmp, "host.log")
+            status.side_effect = [{"reachable": False},
+                                  {"reachable": True, "pid": 7}]
+            result = host_client._start_host_directly("/tmp/rpc.sock", timeout=1)
+        self.assertEqual(result["pid"], 7)
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[1:], ["--mode", "rpc", "--multi-session",
+                                    "--listen", "unix:///tmp/rpc.sock"])
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
     @mock.patch("omo.host_client.subprocess.run")
     @mock.patch("omo.host_client.shutil.which", return_value="/usr/bin/omo")
     def test_ensure_host_maps_timeout(self, _which, run):

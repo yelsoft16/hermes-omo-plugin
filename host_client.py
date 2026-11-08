@@ -101,6 +101,65 @@ def host_status(socket_path: str | None = None, timeout: int = 15) -> dict:
     return data
 
 
+# OmO 5.1.62+ cold start dies in the supervisor bootstrap before the host can
+# answer get_protocol_info. The child closes fd 0, fails to reopen /dev/fd/0,
+# then writes that warning to a duplicated stderr fd that was already closed
+# and reused as an eventfd; 82 bytes to an eventfd is EINVAL, and the unhandled
+# write error kills the host. The host CLI itself is healthy.
+_BOOTSTRAP_CRASH_MARKERS = ("before answering get_protocol_info", "EINVAL")
+
+
+def _looks_like_bootstrap_crash(exc: HostError) -> bool:
+    detail = f"{exc.detail} {exc}"
+    return all(marker in detail for marker in _BOOTSTRAP_CRASH_MARKERS)
+
+
+def _direct_host_log() -> str:
+    directory = os.path.expanduser("~/.omo/agent/logs")
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, "hermes-direct-host.log")
+
+
+def _start_host_directly(socket_path: str | None = None,
+                         timeout: float = 90) -> dict:
+    """Run the host child the supervisor would have run, without the supervisor.
+
+    Used only when the supported `omo host ensure` path is provably broken at
+    bootstrap. The host registers its own endpoint, so `omo host status` sees
+    it as reachable. Without a supervisor the empty-host exit applies; the
+    plugin cold-starts it again when needed.
+    """
+    omo = shutil.which("omo")
+    if not omo:
+        raise HostError("host_unavailable", "omo binary not found", "Install omo")
+    sock = socket_path or default_socket_path()
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("SENPI_RPC_HOST_WATCH")
+           and key not in {"SENPI_RPC_INTERNAL_KEY_STDIN",
+                           "SENPI_RPC_HOST_GENERATION"}}
+    with open(_direct_host_log(), "ab") as log:
+        subprocess.Popen(
+            [omo, "--mode", "rpc", "--multi-session", "--listen", f"unix://{sock}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
+            start_new_session=True, env=env, cwd=os.path.expanduser("~"))
+    deadline = time.monotonic() + max(45.0, float(timeout))
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            status = host_status(sock, timeout=5)
+        except HostError as exc:
+            last_error = exc.detail or str(exc)
+            status = {}
+        if status.get("reachable"):
+            return status
+        time.sleep(1)
+    raise HostError(
+        "host_unavailable",
+        f"direct host did not become reachable at {sock}"
+        + (f": {last_error}" if last_error else ""),
+        "Run: omo host ensure")
+
+
 def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
     status = host_status(socket_path, timeout=timeout)
     if status.get("reachable"):
@@ -122,6 +181,15 @@ def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
             return _host_cmd(args, max(1, int(deadline - time.monotonic())))
         except HostError as exc:
             last = exc
+            if _looks_like_bootstrap_crash(exc):
+                try:
+                    return _start_host_directly(socket_path,
+                                                timeout=max(45, timeout))
+                except HostError as direct_exc:
+                    raise HostError(
+                        "host_unavailable",
+                        f"{exc.detail}; direct launch failed: {direct_exc.detail}",
+                        "Run: omo host ensure") from direct_exc
             time.sleep(1)
             try:
                 status = host_status(socket_path, timeout=5)

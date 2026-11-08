@@ -42,13 +42,19 @@ DAG and agent fan-out.
 
 ## Status and limitations
 
-- Version 0.2.2-dev.1: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
+- Version 0.2.2-dev.2: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
   `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.
 - Requires OmO 5.1.35 (protocolVersion 1) and a reachable host socket
   (`~/.omo/agent/rpc/rpc.sock` by default). `omo host ensure` runs on demand;
   a cold start that misses the CLI's own readiness window is retried once.
+- OmO 5.1.62/5.1.64 can crash the RPC host during a cold start in Bun bootstrap
+  (`EINVAL: invalid argument, write`; a reused eventfd receives the stdin-lifetime
+  warning). The plugin detects that signature and starts the same host child
+  directly (`omo --mode rpc --multi-session --listen unix://...`), so sessions keep
+  working; the supported `omo host ensure` path stays primary and is used whenever
+  it succeeds.
 - Default permission preset is `full-access`; the security warning and the
   restricted-preset guidance live in the bundled skill.
 - Sessions stay open after a settled turn. `omo_wait` reports `status=done` for
