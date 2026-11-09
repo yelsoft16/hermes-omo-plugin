@@ -200,7 +200,7 @@ omo_answer(session_id, request_id, answers)
 
 - `session_running` → `omo_wait` or `omo_cancel`, or pass `parallel=true` to
   `omo_start` only (`omo_resume` has no `parallel`).
-- `host_unavailable` → the plugin tries `omo host ensure` once; if it persists,
+- `host_unavailable` → the plugin cold-starts the host directly (direct child first; `omo host ensure` is only a fallback and crashes with `EINVAL` on 5.1.62/5.1.64 — do not run it manually); if it persists,
   report the error.
 - `session_lost` → call `omo_cancel(session_id)` and then `omo_start`, or call
   `omo_start(..., parallel=true)`.

@@ -78,15 +78,15 @@ def _host_cmd(args: list[str], timeout: int,
         proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise HostError("host_unavailable", f"timed out after {timeout}s",
-                        "Run: omo host ensure") from exc
+                        "Retry omo_start (the plugin launches the host directly; do not run omo host ensure on 5.1.62+)") from exc
     if proc.returncode not in ok_codes:
         raise HostError("host_unavailable", proc.stderr.strip() or proc.stdout.strip(),
-                        "Run: omo host ensure")
+                        "Retry omo_start (the plugin launches the host directly; do not run omo host ensure on 5.1.62+)")
     try:
         return _last_json_line(proc.stdout)
     except ValueError as exc:
         raise HostError("host_unavailable", f"invalid host output: {exc}",
-                        "Run: omo host ensure") from exc
+                        "Retry omo_start (the plugin launches the host directly; do not run omo host ensure on 5.1.62+)") from exc
 
 
 def host_status(socket_path: str | None = None, timeout: int = 15) -> dict:
@@ -102,7 +102,7 @@ def host_status(socket_path: str | None = None, timeout: int = 15) -> dict:
     if "reachable" not in data:
         # Exit 3 with unrelated JSON on stdout is not a status report.
         raise HostError("host_unavailable", f"unexpected host status output: {data}",
-                        "Run: omo host ensure")
+                        "Retry omo_start (the plugin launches the host directly; do not run omo host ensure on 5.1.62+)")
     return data
 
 
@@ -149,7 +149,7 @@ def _start_host_directly(socket_path: str | None = None,
         "host_unavailable",
         f"direct host did not become reachable at {sock}"
         + (f": {last_error}" if last_error else ""),
-        "Run: omo host ensure")
+        "Retry omo_start (the plugin launches the host directly; do not run omo host ensure on 5.1.62+)")
 
 
 def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
@@ -191,7 +191,7 @@ def ensure_host(socket_path: str | None = None, timeout: int = 30) -> dict:
     assert last is not None
     raise HostError("host_unavailable",
                     f"{last.detail}; direct launch failed: {direct_error.detail}",
-                    last.hint or "Run: omo host ensure")
+                    last.hint or "Retry omo_start (the plugin launches the host directly; do not run omo host ensure on 5.1.62+)")
 
 
 def check_protocol(info: dict) -> None:
@@ -300,7 +300,7 @@ class HostClient:
             sock.connect(self.socket_path)
         except OSError as exc:
             sock.close()
-            raise HostError("host_unavailable", str(exc), "Run: omo host ensure") from exc
+            raise HostError("host_unavailable", str(exc), "Retry omo_start (the plugin launches the host directly; do not run omo host ensure on 5.1.62+)") from exc
         sock.settimeout(None)
         try:
             self.attach_socket(sock, handshake=False)

@@ -18,8 +18,9 @@ hermes plugins install yelsoft16/hermes-omo-plugin --enable
 ```
 
 The plugin talks to OmO's RPC host (`~/.omo/agent/rpc/rpc.sock`) and starts it
-on demand with `omo host ensure`. Restart the Hermes gateway after installing
-or updating so the new module is loaded.
+on demand by launching the host child directly; `omo host ensure` is only a
+fallback and crashes with `EINVAL` on OmO 5.1.62/5.1.64. Restart the Hermes
+gateway after installing or updating so the new module is loaded.
 
 `main` is the latest stable release, so a plain `hermes plugins install` always
 clones it. Development happens on the `dev` branch; `-dev.N` tags are
@@ -42,7 +43,7 @@ DAG and agent fan-out.
 
 ## Status and limitations
 
-- Version 0.2.4-dev.1: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
+- Version 0.2.4-dev.2: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
   `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.
