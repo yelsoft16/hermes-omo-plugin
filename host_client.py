@@ -10,6 +10,7 @@ import re
 import secrets
 import select
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -112,6 +113,164 @@ def _direct_host_log() -> str:
     return os.path.join(directory, "hermes-direct-host.log")
 
 
+def _pid_record_path(socket_path: str) -> str:
+    return socket_path + ".hermes-host.pid"
+
+
+def _write_pid_record(socket_path: str, pid: int) -> None:
+    path = _pid_record_path(socket_path)
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"pid": pid, "socket": socket_path,
+                       "started_at": time.time()}, fh)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _read_pid_record(socket_path: str) -> dict | None:
+    try:
+        with open(_pid_record_path(socket_path), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("pid"), int):
+        return None
+    if data["pid"] <= 0:
+        return None
+    return data
+
+
+def _remove_pid_record(socket_path: str) -> None:
+    try:
+        os.unlink(_pid_record_path(socket_path))
+    except OSError:
+        pass
+
+
+def _proc_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return fh.read().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _is_host_pid(pid: int, socket_path: str) -> bool:
+    cmd = _proc_cmdline(pid)
+    return ("omo" in cmd and "--mode rpc" in cmd
+            and f"--listen unix://{socket_path}" in cmd)
+
+
+def _find_direct_host_pid(socket_path: str) -> int | None:
+    record = _read_pid_record(socket_path)
+    if record is not None:
+        return record["pid"]
+    # A host started before PID tracking (or by a manual command) is still
+    # stoppable when its exact listen socket is in the command line.
+    if not os.path.isdir("/proc"):
+        return None
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if _is_host_pid(pid, socket_path):
+            return pid
+    return None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def stop_host(socket_path: str | None = None, timeout: float = 5.0) -> dict:
+    """Stop the directly launched host that owns this socket.
+
+    `omo host stop` refuses a host the plugin started without a supervisor
+    (`unknown_owner`), so the plugin tracks the child PID and terminates it.
+    """
+    sock = socket_path or default_socket_path()
+    pid = _find_direct_host_pid(sock)
+    if pid is None:
+        _remove_pid_record(sock)
+        return {"stopped": False, "reason": "not_running", "pid": None}
+    if not _is_host_pid(pid, sock):
+        _remove_pid_record(sock)
+        return {"stopped": False, "reason": "pid_mismatch", "pid": pid}
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        _remove_pid_record(sock)
+        return {"stopped": False, "reason": "not_running", "pid": pid}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.1)
+    method = "term"
+    if _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            method = "kill"
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and _pid_alive(pid):
+            time.sleep(0.05)
+    _remove_pid_record(sock)
+    return {"stopped": True, "pid": pid, "method": method}
+
+
+def run_daemon_gc(timeout: float = 30.0) -> dict:
+    omo = shutil.which("omo")
+    if not omo:
+        return {"ok": False, "error": "omo binary not found"}
+    try:
+        proc = subprocess.run([omo, "daemon", "gc"], capture_output=True,
+                              text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": proc.returncode == 0, "returncode": proc.returncode,
+            "output": (proc.stdout or proc.stderr or "").strip()[:500]}
+
+
+def maybe_run_daemon_gc(interval_s: float = 86400.0,
+                        stamp_path: str | None = None) -> dict | None:
+    """Reap dead shard endpoints at most once per interval."""
+    path = stamp_path or os.path.join(
+        os.path.dirname(default_socket_path()), "hermes-last-gc")
+    last = 0.0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            last = float(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        pass
+    if time.time() - last < interval_s:
+        return None
+    result = run_daemon_gc()
+    if result.get("ok"):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(str(time.time()))
+        except OSError:
+            pass
+    return result
+
+
 def _start_host_directly(socket_path: str | None = None,
                          timeout: float = 90) -> dict:
     """Run the host child the supervisor would have run, without the supervisor.
@@ -130,10 +289,13 @@ def _start_host_directly(socket_path: str | None = None,
            and key not in {"SENPI_RPC_INTERNAL_KEY_STDIN",
                            "SENPI_RPC_HOST_GENERATION"}}
     with open(_direct_host_log(), "ab") as log:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [omo, "--mode", "rpc", "--multi-session", "--listen", f"unix://{sock}"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
             start_new_session=True, env=env, cwd=os.path.expanduser("~"))
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and pid > 0:
+        _write_pid_record(sock, pid)
     deadline = time.monotonic() + max(45.0, float(timeout))
     last_error = ""
     while time.monotonic() < deadline:

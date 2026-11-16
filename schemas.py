@@ -111,4 +111,17 @@ OMO_RESUME = {
     },
 }
 
-ALL = [OMO_START, OMO_WAIT, OMO_ANSWER, OMO_STATUS, OMO_CANCEL, OMO_RESUME]
+OMO_STOP = {
+    "name": "omo_stop",
+    "description": (
+        "Stop the OmO host, cancel every active OmO session, and reap dead "
+        "endpoints. Use when the user asks to close all OmO processes."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+}
+
+ALL = [OMO_START, OMO_WAIT, OMO_ANSWER, OMO_STATUS, OMO_CANCEL, OMO_RESUME, OMO_STOP]

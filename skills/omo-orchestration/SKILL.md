@@ -5,7 +5,7 @@ description: "Use when delegating an interactive task to OmO (oh-my-openagent): 
 
 # OmO orchestration
 
-OmO runs as an external agent behind its own host daemon. You drive it with six tools.
+OmO runs as an external agent behind its own host daemon. You drive it with seven tools.
 
 ## The loop
 
@@ -27,6 +27,14 @@ Continuing vs starting new:
 - `omo_resume` and `omo_wait` probe the host first and start the on-demand
   daemon with a 90s cold-start budget, so a stopped host is not a manual step.
 - `auto_close=true` is opt-in and restores the old "close on settle" behavior.
+
+## Stopping everything
+
+`omo_stop()` stops the directly launched host, cancels every active session
+record, and runs `omo daemon gc`. Use it when the user says "close all OmO".
+It is a hard stop: open sessions are not kept. `omo_start` also reconciles
+active records older than `stale_after_s` (default 86400 s) automatically, so
+an abandoned session does not block the next start with `session_running`.
 
 State semantics: `running` means OmO is working; `question` means OmO asked and
 is waiting for your answer (the plugin re-presents it on the next `omo_wait` or

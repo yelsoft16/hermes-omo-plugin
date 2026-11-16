@@ -453,5 +453,54 @@ class TestHostCommandErrors(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "host_unavailable")
 
 
+class TestStopHost(unittest.TestCase):
+    @mock.patch("omo.host_client._remove_pid_record")
+    @mock.patch("omo.host_client.time.sleep")
+    @mock.patch("omo.host_client.time.monotonic")
+    @mock.patch("omo.host_client._pid_alive")
+    @mock.patch("omo.host_client.os.kill")
+    @mock.patch("omo.host_client._is_host_pid", return_value=True)
+    @mock.patch("omo.host_client._find_direct_host_pid", return_value=123)
+    def test_term_then_remove_record(self, _find, _is, kill, alive, monotonic,
+                                     _sleep, remove):
+        alive.side_effect = [False, False]
+        monotonic.side_effect = [0.0, 0.5]
+        out = host_client.stop_host("/tmp/rpc.sock", timeout=1)
+        self.assertTrue(out["stopped"])
+        self.assertEqual(out["method"], "term")
+        kill.assert_called_once_with(123, host_client.signal.SIGTERM)
+        remove.assert_called_once_with("/tmp/rpc.sock")
+
+    @mock.patch("omo.host_client._remove_pid_record")
+    @mock.patch("omo.host_client._find_direct_host_pid", return_value=None)
+    def test_no_host_is_not_an_error(self, _find, remove):
+        out = host_client.stop_host("/tmp/rpc.sock")
+        self.assertFalse(out["stopped"])
+        self.assertEqual(out["reason"], "not_running")
+        remove.assert_called_once_with("/tmp/rpc.sock")
+
+    @mock.patch("omo.host_client._remove_pid_record")
+    @mock.patch("omo.host_client._is_host_pid", return_value=False)
+    @mock.patch("omo.host_client._find_direct_host_pid", return_value=123)
+    def test_pid_mismatch_is_never_killed(self, _find, _is, remove):
+        out = host_client.stop_host("/tmp/rpc.sock")
+        self.assertFalse(out["stopped"])
+        self.assertEqual(out["reason"], "pid_mismatch")
+        remove.assert_called_once_with("/tmp/rpc.sock")
+
+
+class TestDaemonGc(unittest.TestCase):
+    @mock.patch("omo.host_client.run_daemon_gc",
+                return_value={"ok": True, "output": "reaped: 1"})
+    def test_gc_runs_once_per_interval(self, gc):
+        with tempfile.TemporaryDirectory() as tmp:
+            stamp = os.path.join(tmp, "last-gc")
+            first = host_client.maybe_run_daemon_gc(interval_s=60, stamp_path=stamp)
+            second = host_client.maybe_run_daemon_gc(interval_s=60, stamp_path=stamp)
+        self.assertEqual(first["output"], "reaped: 1")
+        self.assertIsNone(second)
+        gc.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

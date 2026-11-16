@@ -5,7 +5,7 @@ Local Hermes plugin that drives OmO (oh-my-openagent) sessions over its RPC host
 - Start a new session: `omo_start`
 - Wait for a question or completion: `omo_wait`
 - Answer a question: `omo_answer`
-- Control: `omo_status`, `omo_cancel`, `omo_resume`
+- Control: `omo_status`, `omo_cancel`, `omo_resume`, `omo_stop`
 - Slash command: `/omo status|list|stop|new|resume <n|id>`
 
 Design: `docs/specs/2026-10-19-omo-plugin-design.md`
@@ -43,8 +43,8 @@ DAG and agent fan-out.
 
 ## Status and limitations
 
-- Version 0.2.6-dev.1: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
-  `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`), the `/omo` command
+- Version 0.2.6-dev.2: Hermes plugin exposing seven tools (`omo_start`, `omo_wait`,
+  `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`, `omo_stop`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.
 - Requires OmO 5.1.35 (protocolVersion 1) and a reachable host socket
@@ -69,6 +69,10 @@ DAG and agent fan-out.
   (`seconds_since_last_event`, `last_event_kind`, `last_event_tool`,
   `stalled`). A `running` result with empty `text` is normal for a long
   `/ulw-execute` run; only a 180 s silent transcript is flagged as stalled.
+- `omo_stop` stops the directly launched host (tracked by PID), cancels every
+  active session record, and runs `omo daemon gc`. `omo_start` reconciles
+  active records older than `stale_after_s` (default 24 h), so an abandoned
+  session no longer blocks the next start with `session_running`.
 - Default permission preset is `full-access`; the security warning and the
   restricted-preset guidance live in the bundled skill.
 - Sessions stay open after a settled turn. `omo_wait` reports `status=done` for

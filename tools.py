@@ -15,6 +15,7 @@ from . import questions, schemas
 from .host_client import (
     DIALOG_METHODS, HostClient, HostError, OpenResult, TransportGone,
     check_protocol, default_socket_path, ensure_host, host_status,
+    maybe_run_daemon_gc, stop_host,
 )
 from .sessions import SessionStore, new_session_id
 
@@ -262,6 +263,46 @@ def _resolve(store: SessionStore, hermes_session_id: str, session_id: str | None
     return rec
 
 
+def _reconcile_stale(store: SessionStore, hermes_session_id: str,
+                     stale_after_s: float | None = None) -> list[str]:
+    """Cancel active records whose transcript stopped moving long ago.
+
+    A session that was never waited on stays `running` forever and blocks the
+    next `omo_start` with `session_running`, even after its host is gone.
+    """
+    if stale_after_s is None:
+        try:
+            stale_after_s = float(_cfg("stale_after_s", 86400))
+        except (TypeError, ValueError):
+            stale_after_s = 86400.0
+    now = datetime.now(timezone.utc)
+    rows = store.conn.execute(
+        "SELECT * FROM sessions WHERE hermes_session_id = ? "
+        "AND status IN ('starting','running','question')",
+        (hermes_session_id,)).fetchall()
+    cancelled = []
+    for rec in rows:
+        stamp = rec["updated_at"] or rec["created_at"]
+        try:
+            newest = datetime.fromisoformat(stamp)
+        except (TypeError, ValueError):
+            continue
+        if newest.tzinfo is None:
+            newest = newest.replace(tzinfo=timezone.utc)
+        if rec["session_path"]:
+            try:
+                mtime = datetime.fromtimestamp(
+                    os.stat(rec["session_path"]).st_mtime, timezone.utc)
+                newest = max(newest, mtime)
+            except OSError:
+                pass
+        if (now - newest).total_seconds() >= stale_after_s:
+            store.update(rec["id"], status="cancelled",
+                         pending_request_id=None, pending_question=None)
+            cancelled.append(rec["id"])
+    return cancelled
+
+
 WORKFLOW_COMMANDS = ("ulw-plan", "ulw-execute", "mass-ulw")
 
 
@@ -296,6 +337,7 @@ def handle_start(args: dict, **kwargs) -> str:
         task = _apply_workflow(task, args.get("workflow"))
         hermes_sid = kwargs.get("session_id") or ""
         store = get_store()
+        _reconcile_stale(store, hermes_sid)
         running = store.active_for(hermes_sid)
         if running is not None and not args.get("parallel"):
             return _err("session_running", f"{running['id']} is still {running['status']}",
@@ -305,6 +347,10 @@ def handle_start(args: dict, **kwargs) -> str:
         _validate_permission(permission)
         sid = new_session_id()
         opened = None
+        try:
+            maybe_run_daemon_gc()
+        except Exception:
+            pass
         ensure_host(_socket_path())
         with HostClient(_socket_path()) as host:
             info = host.protocol_info()
@@ -457,6 +503,28 @@ def handle_cancel(args: dict, **kwargs) -> str:
         store.update(rec["id"], status="cancelled",
                      pending_request_id=None, pending_question=None)
         return _json({"ok": True, "session_id": rec["id"], "status": "cancelled"})
+    except HostError as exc:
+        return _err(exc.code, exc.detail, exc.hint)
+    except Exception as exc:
+        return _err("omo_error", str(exc))
+
+
+def handle_stop(args: dict, **kwargs) -> str:
+    """Stop the directly launched host and close every active session."""
+    try:
+        store = get_store()
+        stopped = stop_host(_socket_path())
+        rows = store.conn.execute(
+            "SELECT id FROM sessions WHERE status IN ('starting','running','question')"
+        ).fetchall()
+        cancelled = []
+        for rec in rows:
+            store.update(rec["id"], status="cancelled",
+                         pending_request_id=None, pending_question=None)
+            cancelled.append(rec["id"])
+        gc = maybe_run_daemon_gc(interval_s=0)
+        return _json({"ok": True, "stopped": stopped,
+                      "cancelled_sessions": cancelled, "gc": gc})
     except HostError as exc:
         return _err(exc.code, exc.detail, exc.hint)
     except Exception as exc:
@@ -892,6 +960,7 @@ def register(ctx) -> None:
         (schemas.OMO_STATUS, handle_status),
         (schemas.OMO_CANCEL, handle_cancel),
         (schemas.OMO_RESUME, handle_resume),
+        (schemas.OMO_STOP, handle_stop),
     ):
         ctx.register_tool(name=schema["name"], toolset="omo", schema=schema,
                           handler=handler, emoji="🤖", check_fn=_check_requirements)

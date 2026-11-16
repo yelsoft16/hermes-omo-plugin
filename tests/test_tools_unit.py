@@ -205,6 +205,7 @@ class HandlerTestCase(unittest.TestCase):
     def start(self, args, host, *, check_protocol=True):
         patches = [
             patch.object(tools, "ensure_host"),
+            patch.object(tools, "maybe_run_daemon_gc"),
             patch.object(tools, "HostClient", return_value=host),
             patch.object(tools, "_open_host", return_value=host),
         ]
@@ -613,6 +614,54 @@ class TestHandleCancel(HandlerTestCase):
         self.assertEqual(out["status"], "done")
         self.assertEqual(self.store.get(rec["id"])["status"], "done")
         open_host.assert_not_called()
+
+
+class TestReconcileStale(HandlerTestCase):
+    def test_old_active_record_is_cancelled(self):
+        rec = self.add_session(status="running")
+        old = "2026-01-01T00:00:00+00:00"
+        self.store.conn.execute(
+            "UPDATE sessions SET updated_at=?, created_at=? WHERE id=?",
+            (old, old, rec["id"]))
+        self.store.conn.commit()
+        cancelled = tools._reconcile_stale(self.store, "hermes-1",
+                                           stale_after_s=60)
+        self.assertEqual(cancelled, [rec["id"]])
+        self.assertEqual(self.store.get(rec["id"])["status"], "cancelled")
+
+    def test_recent_active_record_is_kept(self):
+        rec = self.add_session(status="running")
+        self.assertEqual(
+            tools._reconcile_stale(self.store, "hermes-1", stale_after_s=86400), [])
+        self.assertEqual(self.store.get(rec["id"])["status"], "running")
+
+
+class TestHandleStop(HandlerTestCase):
+    def test_stops_host_cancels_active_and_runs_gc(self):
+        rec = self.add_session(status="running")
+        with patch.object(tools, "stop_host",
+                          return_value={"stopped": True, "pid": 123,
+                                        "method": "term"}), \
+                patch.object(tools, "maybe_run_daemon_gc",
+                             return_value={"ok": True, "output": "reaped: 2"}):
+            out = json.loads(tools.handle_stop({}, session_id="hermes-1"))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["stopped"]["pid"], 123)
+        self.assertIn(rec["id"], out["cancelled_sessions"])
+        self.assertEqual(self.store.get(rec["id"])["status"], "cancelled")
+        self.assertEqual(out["gc"]["output"], "reaped: 2")
+
+    def test_not_running_still_cancels_active_records(self):
+        rec = self.add_session(status="running")
+        with patch.object(tools, "stop_host",
+                          return_value={"stopped": False,
+                                        "reason": "not_running", "pid": None}), \
+                patch.object(tools, "maybe_run_daemon_gc",
+                             return_value={"ok": True, "output": ""}):
+            out = json.loads(tools.handle_stop({}, session_id="hermes-1"))
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["stopped"]["stopped"])
+        self.assertEqual(self.store.get(rec["id"])["status"], "cancelled")
 
 
 class TestHandleAnswer(HandlerTestCase):

@@ -203,14 +203,14 @@ class RecordingContext:
 
 
 class TestRegister(unittest.TestCase):
-    def test_registers_six_tools_the_command_and_skips_the_missing_skill(self):
+    def test_registers_seven_tools_the_command_and_skips_the_missing_skill(self):
         ctx = RecordingContext()
         with patch.object(tools, "_CTX", None), \
                 patch.object(tools, "Path", _NoSkillPath):
             tools.register(ctx)
         self.assertEqual([t["name"] for t in ctx.tools],
                          [s["name"] for s in tools.schemas.ALL])
-        self.assertEqual(len(ctx.tools), 6)
+        self.assertEqual(len(ctx.tools), 7)
         self.assertTrue(all(t["check_fn"] is tools._check_requirements
                             for t in ctx.tools))
         self.assertEqual([c[0] for c in ctx.commands], ["omo", "omo_new"])
