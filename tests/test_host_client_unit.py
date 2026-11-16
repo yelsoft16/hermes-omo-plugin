@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -513,6 +514,21 @@ class TestHostEnv(unittest.TestCase):
         self.assertEqual(env["TMP"], "/tmp/private-tmp")
         self.assertEqual(env["TEMP"], "/tmp/private-tmp")
         self.assertNotIn("SENPI_RPC_HOST_WATCH_X", env)
+
+    def test_harden_private_ancestors_removes_write_bits(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.chmod(root, 0o777)
+            host_client._harden_private_ancestors([root])
+            mode = stat.S_IMODE(os.stat(root).st_mode)
+        self.assertEqual(mode & 0o022, 0)
+        self.assertEqual(mode & 0o700, 0o700)
+
+    def test_ancestors_safe_accepts_private_path(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            os.chmod(root, 0o700)
+            self.assertTrue(host_client._ancestors_safe(root))
+            os.chmod(root, 0o775)
+            self.assertFalse(host_client._ancestors_safe(root))
 
     @mock.patch("omo.host_client._private_tmpdir", return_value="/tmp/private-tmp")
     @mock.patch("omo.host_client.subprocess.run")

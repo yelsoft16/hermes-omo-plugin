@@ -28,10 +28,12 @@ Continuing vs starting new:
   daemon with a 90s cold-start budget, so a stopped host is not a manual step.
 - `auto_close=true` is opt-in and restores the old "close on settle" behavior.
 
-The plugin gives host children a private `TMPDIR`/`TMP`/`TEMP` at
-`~/.omo/agent/tmp` (0700). This keeps OmO's `trust-tmpdir-unsafe` check from
-seeing Hermes' group-writable `~/.hermes/cache` ancestor; never point `TMPDIR`
-at `~/.hermes/cache` or its `scratch` child for OmO.
+The plugin gives host children a private `TMPDIR`/`TMP`/`TEMP`. It strips
+group/other write from `~/.omo`, `~/.omo/agent` and `~/.omo/agent/rpc` when
+needed, sets the temp and key directories to 700, and falls back to
+`/tmp/omo-<uid>/tmp` if the home chain is still group-writable. OmO 5.1.71+
+checks every ancestor, not just the leaf; never point `TMPDIR` at
+`~/.hermes/cache` or its `scratch` child.
 
 ## Stopping everything
 

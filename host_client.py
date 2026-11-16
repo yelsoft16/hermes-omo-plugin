@@ -73,12 +73,86 @@ def _last_json_line(text: str) -> dict:
     raise ValueError("no JSON object in output")
 
 
+def _harden_private_ancestors(paths: list[str] | None = None) -> None:
+    """Remove group/other write bits from OmO's own ancestor directories.
+
+    OmO's trust check walks every ancestor of TMPDIR, so a private `tmp` leaf
+    is not enough when `~/.omo` or `~/.omo/agent` is group-writable. These
+    directories belong to the current user and are also where the endpoint
+    key records live; strip only the write bits, keeping read/execute.
+    """
+    if paths is None:
+        omo_home = os.path.expanduser("~/.omo")
+        agent_dir = os.path.join(omo_home, "agent")
+        paths = [omo_home, agent_dir, os.path.join(agent_dir, "rpc")]
+    for path in paths:
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            continue
+        if st.st_uid != os.getuid():
+            continue
+        mode = stat.S_IMODE(st.st_mode)
+        safe = mode & ~0o022
+        if safe != mode:
+            try:
+                os.chmod(path, safe)
+            except OSError:
+                pass
+
+
+def _ancestors_safe(path: str) -> bool:
+    """True when no ancestor is group/other-writable or foreign-owned.
+
+    `/tmp` is the one exception: OmO trusts the sticky system temp root, so a
+    private directory underneath it is usable when a home ancestor is not.
+    """
+    current = os.path.abspath(path)
+    while True:
+        try:
+            st = os.lstat(current)
+        except OSError:
+            return False
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return False
+        mode = stat.S_IMODE(st.st_mode)
+        if st.st_uid not in (0, os.getuid()) or (mode & 0o022):
+            if current == "/tmp" and (mode & stat.S_ISVTX):
+                return True
+            return False
+        parent = os.path.dirname(current)
+        if parent == current:
+            return True
+        current = parent
+
+
 def _private_tmpdir() -> str:
     """A private temp directory with an ancestor chain OmO's trust check accepts."""
-    path = os.path.expanduser("~/.omo/agent/tmp")
+    omo_home = os.path.expanduser("~/.omo")
+    agent_dir = os.path.join(omo_home, "agent")
+    _harden_private_ancestors([omo_home, agent_dir, os.path.join(agent_dir, "rpc")])
+    path = os.path.join(agent_dir, "tmp")
     os.makedirs(path, mode=0o700, exist_ok=True)
     os.chmod(path, 0o700)
-    return path
+    keys_dir = os.path.join(agent_dir, "rpc", "keys")
+    if os.path.isdir(keys_dir):
+        try:
+            os.chmod(keys_dir, 0o700)
+        except OSError:
+            pass
+    if _ancestors_safe(path):
+        return path
+    # A group-writable home/ancestor outside OmO's tree: use a private dir
+    # under the sticky system temp root, which OmO trusts.
+    fallback_root = os.path.join("/tmp", f"omo-{os.getuid()}")
+    os.makedirs(fallback_root, mode=0o700, exist_ok=True)
+    os.chmod(fallback_root, 0o700)
+    fallback = os.path.join(fallback_root, "tmp")
+    os.makedirs(fallback, mode=0o700, exist_ok=True)
+    os.chmod(fallback, 0o700)
+    return fallback
 
 
 def _host_env() -> dict:
