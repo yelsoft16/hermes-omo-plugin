@@ -43,7 +43,7 @@ DAG and agent fan-out.
 
 ## Status and limitations
 
-- Version 0.2.7-dev.1: Hermes plugin exposing seven tools (`omo_start`, `omo_wait`,
+- Version 0.2.7-dev.2: Hermes plugin exposing seven tools (`omo_start`, `omo_wait`,
   `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`, `omo_stop`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.
@@ -73,6 +73,9 @@ DAG and agent fan-out.
   active session record, and runs `omo daemon gc`. `omo_start` reconciles
   active records older than `stale_after_s` (default 24 h), so an abandoned
   session no longer blocks the next start with `session_running`.
+- Host children receive a private `TMPDIR`/`TMP`/`TEMP` at
+  `~/.omo/agent/tmp` (0700), so OmO 5.1.71+ never sees Hermes'
+  group-writable `~/.hermes/cache` ancestor (`trust-tmpdir-unsafe`).
 - Default permission preset is `full-access`; the security warning and the
   restricted-preset guidance live in the bundled skill.
 - Sessions stay open after a settled turn. `omo_wait` reports `status=done` for

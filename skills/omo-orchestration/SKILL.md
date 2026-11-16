@@ -28,6 +28,11 @@ Continuing vs starting new:
   daemon with a 90s cold-start budget, so a stopped host is not a manual step.
 - `auto_close=true` is opt-in and restores the old "close on settle" behavior.
 
+The plugin gives host children a private `TMPDIR`/`TMP`/`TEMP` at
+`~/.omo/agent/tmp` (0700). This keeps OmO's `trust-tmpdir-unsafe` check from
+seeing Hermes' group-writable `~/.hermes/cache` ancestor; never point `TMPDIR`
+at `~/.hermes/cache` or its `scratch` child for OmO.
+
 ## Stopping everything
 
 `omo_stop()` stops the directly launched host, cancels every active session

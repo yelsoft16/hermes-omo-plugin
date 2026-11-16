@@ -73,10 +73,41 @@ def _last_json_line(text: str) -> dict:
     raise ValueError("no JSON object in output")
 
 
+def _private_tmpdir() -> str:
+    """A private temp directory with an ancestor chain OmO's trust check accepts."""
+    path = os.path.expanduser("~/.omo/agent/tmp")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def _host_env() -> dict:
+    """Environment for every `omo` host command.
+
+    Hermes' terminal scratch lives under `~/.hermes/cache`, which is
+    group-writable. OmO 5.1.71+ refuses such a temp ancestor with
+    `trust-tmpdir-unsafe`; override all three temp variables with a private
+    directory so the host never inherits that chain.
+    """
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("SENPI_RPC_HOST_WATCH")
+           and key not in {"SENPI_RPC_INTERNAL_KEY_STDIN",
+                           "SENPI_RPC_HOST_GENERATION"}}
+    try:
+        tmp = _private_tmpdir()
+    except OSError:
+        return env
+    env["TMPDIR"] = tmp
+    env["TMP"] = tmp
+    env["TEMP"] = tmp
+    return env
+
+
 def _host_cmd(args: list[str], timeout: int,
               ok_codes: tuple[int, ...] = (0,)) -> dict:
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout, env=_host_env())
     except subprocess.TimeoutExpired as exc:
         raise HostError("host_unavailable", f"timed out after {timeout}s",
                         "Retry omo_start (the plugin launches the host directly; do not run omo host ensure on 5.1.62+)") from exc
@@ -240,7 +271,7 @@ def run_daemon_gc(timeout: float = 30.0) -> dict:
     try:
         proc = subprocess.run([omo, "daemon", "gc"], capture_output=True,
                               text=True, timeout=timeout,
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, env=_host_env())
     except (OSError, subprocess.SubprocessError) as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": proc.returncode == 0, "returncode": proc.returncode,
@@ -284,10 +315,7 @@ def _start_host_directly(socket_path: str | None = None,
     if not omo:
         raise HostError("host_unavailable", "omo binary not found", "Install omo")
     sock = socket_path or default_socket_path()
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith("SENPI_RPC_HOST_WATCH")
-           and key not in {"SENPI_RPC_INTERNAL_KEY_STDIN",
-                           "SENPI_RPC_HOST_GENERATION"}}
+    env = _host_env()
     with open(_direct_host_log(), "ab") as log:
         proc = subprocess.Popen(
             [omo, "--mode", "rpc", "--multi-session", "--listen", f"unix://{sock}"],

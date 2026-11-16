@@ -502,5 +502,26 @@ class TestDaemonGc(unittest.TestCase):
         gc.assert_called_once()
 
 
+class TestHostEnv(unittest.TestCase):
+    @mock.patch("omo.host_client._private_tmpdir", return_value="/tmp/private-tmp")
+    def test_overrides_all_temp_vars(self, _tmp):
+        with mock.patch.dict(os.environ, {
+                "TMPDIR": "/bad", "TMP": "/bad", "TEMP": "/bad",
+                "SENPI_RPC_HOST_WATCH_X": "1"}):
+            env = host_client._host_env()
+        self.assertEqual(env["TMPDIR"], "/tmp/private-tmp")
+        self.assertEqual(env["TMP"], "/tmp/private-tmp")
+        self.assertEqual(env["TEMP"], "/tmp/private-tmp")
+        self.assertNotIn("SENPI_RPC_HOST_WATCH_X", env)
+
+    @mock.patch("omo.host_client._private_tmpdir", return_value="/tmp/private-tmp")
+    @mock.patch("omo.host_client.subprocess.run")
+    def test_host_cmd_passes_the_private_env(self, run, _tmp):
+        run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='{"reachable": true}', stderr="")
+        host_client._host_cmd(["/usr/bin/omo", "host", "status", "--json"], 5)
+        self.assertEqual(run.call_args.kwargs["env"]["TMPDIR"], "/tmp/private-tmp")
+
+
 if __name__ == "__main__":
     unittest.main()
