@@ -33,6 +33,20 @@ is waiting for your answer (the plugin re-presents it on the next `omo_wait` or
 `omo_status`, without contacting the host); `idle` means the turn settled and
 the session is ready for the next instruction, not closed.
 
+A `running` result is not a hang, even when `text` is empty. `omo_wait` is
+bounded (default 90 s, max 120 s): on expiry it returns `running`, not an
+error. Repeat it and read `progress`:
+
+- `seconds_since_last_event` small / `stalled: false` → OmO is active; keep
+  waiting.
+- `stalled: true` (no transcript event for 180 s) → inspect
+  `last_event_kind` and `last_event_tool`, and check the process/CPU. Do not
+  cancel on empty `text` alone.
+
+`/ulw-execute` and `mass-ulw` legitimately run 10–20+ minutes; a 2–3 minute
+wait proves nothing. `omo_cancel` is only for explicit abandonment or a
+confirmed dead session.
+
 If a clarify question times out, do NOT cancel or close the session. Leave it
 open and, on the user's next message, call `omo_status`: it reconciles a missed
 `agent_settled` by reading the transcript (last assistant stopReason `stop`, no

@@ -43,7 +43,7 @@ DAG and agent fan-out.
 
 ## Status and limitations
 
-- Version 0.2.5-dev.1: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
+- Version 0.2.5-dev.2: Hermes plugin exposing six tools (`omo_start`, `omo_wait`,
   `omo_answer`, `omo_status`, `omo_cancel`, `omo_resume`), the `/omo` command
   (`status|list|stop|new|resume`), the standalone `/omo_new` command, and the
   bundled skill `omo:omo-orchestration`.
@@ -65,6 +65,10 @@ DAG and agent fan-out.
   only rewrites RPC sessions that did not pick a model, so this keeps the plugin on
   the configured default (the same model the TUI opens with); `model=...` still
   overrides it.
+- `omo_wait` and `omo_status` include a `progress` block
+  (`seconds_since_last_event`, `last_event_kind`, `last_event_tool`,
+  `stalled`). A `running` result with empty `text` is normal for a long
+  `/ulw-execute` run; only a 180 s silent transcript is flagged as stalled.
 - Default permission preset is `full-access`; the security warning and the
   restricted-preset guidance live in the bundled skill.
 - Sessions stay open after a settled turn. `omo_wait` reports `status=done` for

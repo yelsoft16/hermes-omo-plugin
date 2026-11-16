@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -379,6 +380,48 @@ class TestDefaultModel(unittest.TestCase):
     def test_missing_settings_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(tools._default_model(tmp), (None, None))
+
+
+class TestTranscriptProgress(unittest.TestCase):
+    def _write(self, tmp, events):
+        path = os.path.join(tmp, "session.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            for event in events:
+                fh.write(json.dumps(event) + "\n")
+        return path
+
+    def test_recent_assistant_text_is_not_stalled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            path = self._write(tmp, [{
+                "type": "message", "timestamp": now,
+                "message": {"role": "assistant", "stopReason": "stop",
+                            "content": [{"type": "text", "text": "ok"}]},
+            }])
+            progress = tools._transcript_progress(path)
+        self.assertFalse(progress["stalled"])
+        self.assertEqual(progress["last_event_kind"], "assistant_text")
+        self.assertLess(progress["seconds_since_last_event"], 5)
+
+    def test_old_tool_call_is_stalled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = (datetime.now(timezone.utc) - timedelta(seconds=400)) \
+                .isoformat().replace("+00:00", "Z")
+            path = self._write(tmp, [{
+                "type": "message", "timestamp": old,
+                "message": {"role": "assistant", "stopReason": "toolUse",
+                            "toolName": "read",
+                            "content": [{"type": "toolCall", "toolName": "read"}]},
+            }])
+            progress = tools._transcript_progress(path)
+        self.assertTrue(progress["stalled"])
+        self.assertEqual(progress["last_event_kind"], "tool_call")
+        self.assertGreaterEqual(progress["seconds_since_last_event"], 399)
+
+    def test_missing_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            progress = tools._transcript_progress(os.path.join(tmp, "missing.jsonl"))
+        self.assertTrue(progress["transcript_missing"])
 
 
 class TestHandleWait(HandlerTestCase):

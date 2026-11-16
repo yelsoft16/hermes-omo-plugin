@@ -374,7 +374,17 @@ def handle_wait(args: dict, **kwargs) -> str:
         if settled is not None:
             return _done_result(store, rec, settled)
         store.update(rec["id"], status="running", last_text=text)
-        return _json({"ok": True, "session_id": rec["id"], "status": "running", "text": text})
+        progress = _transcript_progress(rec["session_path"])
+        payload = {"ok": True, "session_id": rec["id"], "status": "running",
+                   "text": text, "progress": progress}
+        if progress.get("stalled"):
+            payload["warning"] = (
+                "no transcript event for "
+                f"{progress.get('seconds_since_last_event')}s (last: "
+                f"{progress.get('last_event_kind') or 'unknown'} "
+                f"{progress.get('last_event_tool') or ''}); inspect before cancelling"
+            )
+        return _json(payload)
     except HostError as exc:
         return _err(exc.code, exc.detail, exc.hint)
     except Exception as exc:
@@ -410,6 +420,7 @@ def handle_status(args: dict, **kwargs) -> str:
             "elapsed_s": int((datetime.now(timezone.utc)
                               - datetime.fromisoformat(rec["created_at"])).total_seconds()),
             "last_text": rec["last_text"] or "",
+            "progress": _transcript_progress(rec["session_path"]),
             "pending_question": json.loads(rec["pending_question"])
             if rec["pending_question"] else None,
             "host": info,
@@ -645,6 +656,72 @@ def _transcript_settled_text(path: str | None) -> str | None:
     if last and last[0] == "stop" and not last[1] and stop_count == 0:
         return last[2]
     return None
+
+
+def _transcript_progress(path: str | None) -> dict:
+    """Last transcript event and its age, to tell work from a stall.
+
+    `omo_wait` can return ``running`` with an empty ``text`` while OmO is still
+    working. The caller needs the last event and how long ago it was written;
+    cancelling on empty text alone is how a healthy long run gets killed.
+    """
+    if not path:
+        return {}
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return {"transcript_missing": True}
+    last = None
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(max(0, stat.st_size - 256 * 1024))
+            chunk = fh.read()
+    except OSError:
+        return {"transcript_bytes": stat.st_size}
+    lines = chunk.splitlines()
+    if stat.st_size > 256 * 1024 and lines:
+        lines = lines[1:]
+    for raw in reversed(lines):
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            continue
+        if obj.get("timestamp"):
+            last = obj
+            break
+    progress = {"transcript_bytes": stat.st_size,
+                "transcript_mtime": datetime.fromtimestamp(
+                    stat.st_mtime, timezone.utc).isoformat()}
+    if last is None:
+        return progress
+    msg = last.get("message") or {}
+    role = msg.get("role")
+    kind = last.get("type") or ""
+    stop = msg.get("stopReason")
+    if kind == "message":
+        if role == "assistant":
+            kind = "tool_call" if stop == "toolUse" else "assistant_text"
+        elif role == "toolResult":
+            kind = "tool_result"
+        elif role == "user":
+            kind = "user"
+    elif kind == "custom":
+        kind = last.get("customType") or "custom"
+    stamp = last["timestamp"]
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        age = max(0, int((datetime.now(timezone.utc) - moment).total_seconds()))
+    except (TypeError, ValueError):
+        age = None
+    progress.update({
+        "last_event_at": stamp,
+        "last_event_kind": kind,
+        "last_event_role": role,
+        "last_event_tool": msg.get("toolName"),
+        "seconds_since_last_event": age,
+        "stalled": bool(age is not None and age >= 180),
+    })
+    return progress
 
 
 def _session_title(rec) -> str:
